@@ -117,6 +117,8 @@ type SuppressionRow = {
     source: string;
     added: string;
     expires: string;
+    active: boolean;
+    expires_at: string | null;
 };
 
 type ProjectOption = {
@@ -161,7 +163,7 @@ type WorkspaceMemberRole =
     | 'domains'
     | 'read_only';
 
-type ApiKeyScope = 'send' | 'read:activity';
+type ApiKeyScope = 'send' | 'read:activity' | 'manage:suppressions';
 
 type ConfirmationState = {
     title: string;
@@ -188,6 +190,7 @@ const props = defineProps<{
         can_manage_members: boolean;
         can_manage_api_keys: boolean;
         can_manage_domains: boolean;
+        can_manage_suppressions: boolean;
         can_send: boolean;
     };
     workspaceMembers: {
@@ -296,6 +299,12 @@ const props = defineProps<{
     webhookStats: BounceMetric[];
     webhookDeliveries: WebhookDeliveryRow[];
     suppressions: SuppressionRow[];
+    suppressionStats: {
+        active: number;
+        hard_bounce: number;
+        complaint: number;
+        expired: number;
+    };
     newWebhookEndpoint: NewWebhookEndpoint | null;
     sesWebhookUrl: string | null;
     apiKeys: {
@@ -373,6 +382,7 @@ const revealedWebhookEndpoint = ref(props.newWebhookEndpoint);
 const webhookSecretCopied = ref(false);
 const checkingDomainId = ref<number | null>(null);
 const deletingDomainId = ref<number | null>(null);
+const removingSuppressionId = ref<number | null>(null);
 const copiedDnsKey = ref<string | null>(null);
 const inspectorWidth = ref(600);
 const mailLayoutStyle = computed<Record<string, string>>(() => ({
@@ -492,6 +502,7 @@ const workspaceRoleOptions: {
 const apiKeyScopeOptions: { value: ApiKeyScope; label: string }[] = [
     { value: 'send', label: 'Send email' },
     { value: 'read:activity', label: 'Read activity' },
+    { value: 'manage:suppressions', label: 'Manage suppressions' },
 ];
 
 const filteredEmails = computed(() => {
@@ -533,16 +544,11 @@ const complaintRows = computed(() =>
 );
 
 const suppressionRows = computed(() => props.suppressions);
-const bounceSuppressionCount = computed(
-    () =>
-        suppressionRows.value.filter((row) => row.reason === 'hard_bounce')
-            .length,
-);
-const complaintSuppressionCount = computed(
-    () =>
-        suppressionRows.value.filter((row) => row.reason === 'complaint')
-            .length,
-);
+const suppressionError = computed(() => {
+    const errors = page.props.errors as Record<string, string> | undefined;
+
+    return errors?.suppression ?? null;
+});
 const lastComplaintTime = computed(
     () => complaintRows.value[0]?.time ?? 'Never',
 );
@@ -1075,7 +1081,16 @@ function toggleApiKeyScope(scope: ApiKeyScope): void {
 }
 
 function apiKeyScopes(apiKey: { scopes: ApiKeyScope[] | null }): ApiKeyScope[] {
-    return apiKey.scopes?.length ? apiKey.scopes : ['send', 'read:activity'];
+    return apiKey.scopes?.length
+        ? apiKey.scopes
+        : ['send', 'read:activity', 'manage:suppressions'];
+}
+
+function apiKeyScopeLabel(scope: ApiKeyScope): string {
+    return (
+        apiKeyScopeOptions.find((option) => option.value === scope)?.label ??
+        scope
+    );
 }
 
 function rotateApiKey(apiKey: { id: number; name: string }): void {
@@ -1103,6 +1118,34 @@ function deleteApiKey(apiKey: { id: number; name: string }): void {
         onConfirm: () => {
             router.delete(projectAction(`/api-keys/${apiKey.id}`), {
                 preserveScroll: true,
+            });
+        },
+    });
+}
+
+function removeSuppression(suppression: SuppressionRow): void {
+    if (removingSuppressionId.value !== null) {
+        return;
+    }
+
+    openConfirmation({
+        title: `Remove ${suppression.email}?`,
+        body: isCloudflare.value
+            ? 'Larasend will verify this recipient is no longer on the Cloudflare suppression list before deleting the local record. Remove it in Cloudflare first if it is still listed there.'
+            : `Larasend will remove this recipient from ${providerLabel.value} before deleting the local record. If the provider request fails, the suppression will remain in Larasend.`,
+        actionLabel: 'Remove suppression',
+        tone: 'danger',
+        onConfirm: () => {
+            if (removingSuppressionId.value !== null) {
+                return;
+            }
+
+            removingSuppressionId.value = suppression.id;
+            router.delete(projectAction(`/suppressions/${suppression.id}`), {
+                preserveScroll: true,
+                onFinish: () => {
+                    removingSuppressionId.value = null;
+                },
             });
         },
     });
@@ -1991,7 +2034,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                 Suppressed
                             </div>
                             <div class="mt-1 font-sans text-xl font-semibold">
-                                {{ complaintSuppressionCount }}
+                                {{ suppressionStats.complaint }}
                             </div>
                             <div
                                 class="mt-0.5 font-mono text-[11.5px] text-zinc-500 dark:text-[#9aa0a6]"
@@ -4535,7 +4578,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                         v-for="scope in apiKeyScopes(apiKey)"
                                         :key="`${apiKey.id}-${scope}`"
                                         class="rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-[11px] text-zinc-500 dark:bg-[#1a1e22]"
-                                        >{{ scope }}</span
+                                        >{{ apiKeyScopeLabel(scope) }}</span
                                     >
                                 </div>
                                 <div
@@ -4601,7 +4644,7 @@ function recipientTitle(email: EmailRow): string | undefined {
 
                     <div v-else class="grid gap-4">
                         <section
-                            class="grid grid-cols-5 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-[#1d2125] dark:bg-[#111315]"
+                            class="grid grid-cols-2 overflow-hidden rounded-lg border border-zinc-200 bg-white lg:grid-cols-5 dark:border-[#1d2125] dark:bg-[#111315]"
                         >
                             <div
                                 class="border-r border-zinc-200 px-3 py-2.5 dark:border-[#1d2125]"
@@ -4609,15 +4652,15 @@ function recipientTitle(email: EmailRow): string | undefined {
                                 <div
                                     class="font-mono text-[11px] tracking-widest text-zinc-500 uppercase"
                                 >
-                                    Suppressed
+                                    Active
                                 </div>
                                 <div class="mt-3 text-xl font-semibold">
-                                    {{ suppressionRows.length }}
+                                    {{ suppressionStats.active }}
                                 </div>
                                 <div
-                                    class="mt-1 font-mono text-[12px] text-zinc-500"
+                                    class="mt-1 font-mono text-[12px] text-emerald-600 dark:text-emerald-400"
                                 >
-                                    total
+                                    blocked
                                 </div>
                             </div>
                             <div
@@ -4629,10 +4672,10 @@ function recipientTitle(email: EmailRow): string | undefined {
                                     Bounces
                                 </div>
                                 <div class="mt-3 text-xl font-semibold">
-                                    {{ bounceSuppressionCount }}
+                                    {{ suppressionStats.hard_bounce }}
                                 </div>
                                 <div
-                                    class="mt-1 font-mono text-[12px] text-red-400"
+                                    class="mt-1 font-mono text-[12px] text-red-600 dark:text-red-400"
                                 >
                                     blocked
                                 </div>
@@ -4646,10 +4689,10 @@ function recipientTitle(email: EmailRow): string | undefined {
                                     Complaints
                                 </div>
                                 <div class="mt-3 text-xl font-semibold">
-                                    {{ complaintSuppressionCount }}
+                                    {{ suppressionStats.complaint }}
                                 </div>
                                 <div
-                                    class="mt-1 font-mono text-[12px] text-violet-400"
+                                    class="mt-1 font-mono text-[12px] text-violet-600 dark:text-violet-400"
                                 >
                                     blocked
                                 </div>
@@ -4660,13 +4703,15 @@ function recipientTitle(email: EmailRow): string | undefined {
                                 <div
                                     class="font-mono text-[11px] tracking-widest text-zinc-500 uppercase"
                                 >
-                                    Manual
+                                    Expired
                                 </div>
-                                <div class="mt-3 text-xl font-semibold">0</div>
+                                <div class="mt-3 text-xl font-semibold">
+                                    {{ suppressionStats.expired }}
+                                </div>
                                 <div
                                     class="mt-1 font-mono text-[12px] text-zinc-500"
                                 >
-                                    list
+                                    history
                                 </div>
                             </div>
                             <div class="px-3 py-2.5">
@@ -4679,7 +4724,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                     Active
                                 </div>
                                 <div
-                                    class="mt-1 font-mono text-[12px] text-emerald-400"
+                                    class="mt-1 font-mono text-[12px] text-emerald-600 dark:text-emerald-400"
                                 >
                                     enforced
                                 </div>
@@ -4705,21 +4750,30 @@ function recipientTitle(email: EmailRow): string | undefined {
                                 </a>
                             </div>
                             <div
-                                class="overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-[#1d2125] dark:bg-[#0b0c0d]"
+                                v-if="suppressionError"
+                                role="alert"
+                                class="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[12px] text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300"
+                            >
+                                {{ suppressionError }}
+                            </div>
+                            <div
+                                class="overflow-x-auto rounded-lg border border-zinc-200 bg-white dark:border-[#1d2125] dark:bg-[#0b0c0d]"
                             >
                                 <div
-                                    class="grid grid-cols-[minmax(260px,1fr)_150px_220px_140px_130px] border-b border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-[11px] tracking-widest text-zinc-500 uppercase dark:border-[#1d2125] dark:bg-[#111315]"
+                                    class="grid min-w-[1100px] grid-cols-[minmax(240px,1fr)_140px_180px_110px_120px_100px_130px] border-b border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-[11px] tracking-widest text-zinc-500 uppercase dark:border-[#1d2125] dark:bg-[#111315]"
                                 >
                                     <div>Recipient</div>
                                     <div>Reason</div>
                                     <div>Source</div>
                                     <div>Added</div>
                                     <div>Expires</div>
+                                    <div>Status</div>
+                                    <div>Actions</div>
                                 </div>
                                 <div
                                     v-for="email in suppressionRows"
                                     :key="email.id"
-                                    class="grid h-11 grid-cols-[minmax(260px,1fr)_150px_220px_140px_130px] items-center border-b border-zinc-200 px-3 text-[13px] last:border-b-0 dark:border-[#16191c]"
+                                    class="grid min-h-12 min-w-[1100px] grid-cols-[minmax(240px,1fr)_140px_180px_110px_120px_100px_130px] items-center border-b border-zinc-200 px-3 text-[13px] last:border-b-0 dark:border-[#16191c]"
                                 >
                                     <div class="truncate">
                                         {{ email.email }}
@@ -4749,6 +4803,56 @@ function recipientTitle(email: EmailRow): string | undefined {
                                         class="font-mono text-[12px] text-zinc-500"
                                     >
                                         {{ email.expires }}
+                                    </div>
+                                    <div>
+                                        <span
+                                            class="rounded px-1.5 py-0.5 font-mono text-[11px]"
+                                            :title="
+                                                email.expires_at
+                                                    ? `Expiration: ${email.expires}`
+                                                    : 'No expiration date'
+                                            "
+                                            :class="
+                                                email.active
+                                                    ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300'
+                                                    : 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300'
+                                            "
+                                        >
+                                            {{
+                                                email.active
+                                                    ? 'Active'
+                                                    : 'Expired'
+                                            }}
+                                        </span>
+                                    </div>
+                                    <div>
+                                        <button
+                                            v-if="
+                                                workspace.can_manage_suppressions
+                                            "
+                                            type="button"
+                                            class="inline-flex items-center gap-1.5 rounded-md border border-red-200 px-2.5 py-1.5 text-[11px] font-semibold text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-500/30 dark:text-red-300 dark:hover:bg-red-500/10"
+                                            :disabled="
+                                                removingSuppressionId !== null
+                                            "
+                                            title="Remove suppression"
+                                            @click="removeSuppression(email)"
+                                        >
+                                            <RefreshCw
+                                                v-if="
+                                                    removingSuppressionId ===
+                                                    email.id
+                                                "
+                                                class="size-3 animate-spin"
+                                            />
+                                            <Trash2 v-else class="size-3" />
+                                            {{
+                                                removingSuppressionId ===
+                                                email.id
+                                                    ? 'Removing...'
+                                                    : 'Remove'
+                                            }}
+                                        </button>
                                     </div>
                                 </div>
                                 <div

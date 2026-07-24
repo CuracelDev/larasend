@@ -69,6 +69,7 @@ it('returns active suppression metadata and statistics', function () {
         ->get('/suppressions')
         ->assertSuccessful()
         ->assertInertia(fn ($page) => $page
+            ->where('workspace.can_manage_suppressions', true)
             ->where('suppressionStats', [
                 'active' => 2,
                 'hard_bounce' => 1,
@@ -83,6 +84,21 @@ it('returns active suppression metadata and statistics', function () {
                     && $suppression['active'] === true
                     && $suppression['expires_at'] === null))
         );
+});
+
+it('renders suppression management and api key scope controls in the activity page source', function () {
+    $activitySource = file_get_contents(resource_path('js/pages/Activity.vue'));
+
+    expect($activitySource)
+        ->toContain("type ApiKeyScope = 'send' | 'read:activity' | 'manage:suppressions';")
+        ->toContain("{ value: 'manage:suppressions', label: 'Manage suppressions' }")
+        ->toContain('suppressionStats.active')
+        ->toContain('workspace.can_manage_suppressions')
+        ->toContain('removeSuppression(email)')
+        ->toContain('email.active')
+        ->toContain("? 'Active'")
+        ->toContain(": 'Expired'")
+        ->toContain('<div>Actions</div>');
 });
 
 it('renders recent active inbox conversations on the dashboard', function () {
