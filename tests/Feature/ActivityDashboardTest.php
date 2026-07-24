@@ -459,6 +459,16 @@ it('exports suppression rows with formula-safe values', function () {
         'expires_at' => now()->subDay(),
     ]);
 
+    Suppression::query()->create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email' => '-recipient@example.com',
+        'reason' => "\t=reason",
+        'event_type' => "\r @provider_sync",
+        'expires_at' => now()->subDay(),
+    ]);
+
     $export = $this->actingAs($user)
         ->get('/activity/export?section=suppressions')
         ->assertSuccessful()
@@ -466,15 +476,29 @@ it('exports suppression rows with formula-safe values', function () {
         ->assertHeader('content-disposition', 'attachment; filename=larasend-suppressions.csv');
 
     $content = $export->streamedContent();
+    $stream = fopen('php://memory', 'r+');
+    fwrite($stream, $content);
+    rewind($stream);
+    $rows = [];
 
-    expect(str_getcsv(strtok($content, "\n")))
+    while (($row = fgetcsv($stream)) !== false) {
+        $rows[] = $row;
+    }
+
+    fclose($stream);
+
+    expect($rows[0])
         ->toBe(['Recipient', 'Reason', 'Source', 'Added at', 'Expires at', 'Status']);
 
-    expect($content)
-        ->toContain("'=recipient@example.com")
-        ->toContain("'+reason")
-        ->toContain("'@provider_sync")
-        ->toContain('Expired');
+    $directFormulaRow = collect($rows)->first(fn (array $row): bool => str_contains($row[0] ?? '', '=recipient@example.com'));
+    $controlWhitespaceRow = collect($rows)->first(fn (array $row): bool => str_contains($row[0] ?? '', '-recipient@example.com'));
+
+    expect(array_slice($directFormulaRow, 0, 3))
+        ->toBe(["'=recipient@example.com", "'+reason", "'@provider_sync"])
+        ->and($directFormulaRow[5])->toBe('Expired')
+        ->and(array_slice($controlWhitespaceRow, 0, 3))
+        ->toBe(["'-recipient@example.com", "'\t=reason", "'\r @provider_sync"])
+        ->and($controlWhitespaceRow[5])->toBe('Expired');
 });
 
 it('allows workspace users to download raw mime content', function () {

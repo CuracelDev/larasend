@@ -72,7 +72,7 @@ class ActivityExportController extends Controller
 
     private function formulaSafe(string $value): string
     {
-        if (in_array($value[0] ?? '', ['=', '+', '-', '@'], true)) {
+        if (preg_match('/\A[\x00-\x20]*[=+\-@]/', $value) === 1) {
             return "'{$value}";
         }
 

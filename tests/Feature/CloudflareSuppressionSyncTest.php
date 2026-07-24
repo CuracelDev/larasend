@@ -160,6 +160,38 @@ it('preserves provider sync suppressions when the Cloudflare fetch fails', funct
     expect($suppression->fresh())->not->toBeNull();
 });
 
+it('preserves provider sync suppressions when Cloudflare returns an invalid success envelope', function (array $responseBody, string $slug) {
+    Http::preventStrayRequests();
+
+    [$project, $source] = cloudflareSuppressionSource($slug, "acc-{$slug}");
+
+    $suppression = Suppression::create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email' => 'preserved@example.com',
+        'reason' => 'hard_bounce',
+        'event_type' => 'provider_sync',
+    ]);
+
+    Http::fake([
+        "https://api.cloudflare.com/client/v4/accounts/acc-{$slug}/email/sending/suppression*" => Http::response($responseBody),
+    ]);
+
+    (new SyncCloudflareSuppressions)->handle(app(CloudflareApiClient::class));
+
+    expect($suppression->fresh())->not->toBeNull();
+})->with([
+    'explicit API failure' => [
+        ['success' => false, 'result' => []],
+        'cf-envelope-failure',
+    ],
+    'missing result collection' => [
+        ['success' => true],
+        'cf-envelope-missing-result',
+    ],
+]);
+
 it('continues syncing other sources when one token fails', function () {
     cloudflareSuppressionSource('cf-bad', 'acc-bad');
     cloudflareSuppressionSource('cf-good', 'acc-good');

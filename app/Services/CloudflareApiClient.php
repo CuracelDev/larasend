@@ -47,7 +47,11 @@ class CloudflareApiClient
 
             $this->ensureSuccessful($response);
 
-            $results = $response->json('result') ?? [];
+            $results = $response->json('result');
+
+            if ($response->json('success') !== true || ! is_array($results) || ! array_is_list($results)) {
+                throw new RuntimeException('Cloudflare returned an invalid suppression list response.');
+            }
 
             foreach ($results as $suppression) {
                 $suppressions[] = [
