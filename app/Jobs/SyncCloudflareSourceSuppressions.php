@@ -3,6 +3,7 @@
 namespace App\Jobs;
 
 use App\Enums\SourceProvider;
+use App\Models\Project;
 use App\Models\Source;
 use App\Models\Suppression;
 use App\Services\CloudflareApiClient;
@@ -72,10 +73,7 @@ class SyncCloudflareSourceSuppressions implements ShouldBeUnique, ShouldQueue
                 'expires_at' => $suppression['expires_at'] ? Carbon::parse($suppression['expires_at']) : null,
             ];
 
-            $candidate = $project->suppressions()->firstOrCreate(
-                ['email' => $email],
-                $values,
-            );
+            $candidate = $this->suppressionForEmail($project, $email, $values);
 
             $isOwned = DB::transaction(function () use ($project, $source, $candidate, $values): bool {
                 $existing = $project->suppressions()
@@ -113,7 +111,7 @@ class SyncCloudflareSourceSuppressions implements ShouldBeUnique, ShouldQueue
             return;
         }
 
-        $providerSyncSuppressions->whereNotIn('email', $syncedEmails)->delete();
+        $providerSyncSuppressions->whereNormalizedEmailNotIn($syncedEmails)->delete();
     }
 
     /**
@@ -155,6 +153,16 @@ class SyncCloudflareSourceSuppressions implements ShouldBeUnique, ShouldQueue
     protected function monotonicTime(): float
     {
         return hrtime(true) / 1_000_000_000;
+    }
+
+    /**
+     * @param  array<string, mixed>  $values
+     */
+    private function suppressionForEmail(Project $project, string $email, array $values): Suppression
+    {
+        return $project->suppressions()
+            ->whereNormalizedEmail($email)
+            ->firstOrCreate([], ['email' => $email, ...$values]);
     }
 
     private function mapReason(string $reason): string

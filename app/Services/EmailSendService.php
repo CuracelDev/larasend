@@ -221,7 +221,7 @@ class EmailSendService
 
         $suppressed = $project->suppressions()
             ->active()
-            ->whereIn('email', $recipients)
+            ->whereNormalizedEmailIn($recipients)
             ->pluck('email')
             ->map(fn (string $email): string => Suppression::normalizeEmail($email))
             ->all();

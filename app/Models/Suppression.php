@@ -53,6 +53,32 @@ class Suppression extends Model
     /**
      * @param  Builder<Suppression>  $query
      */
+    public function scopeWhereNormalizedEmail(Builder $query, string $email): void
+    {
+        $query->where($this->normalizedEmailColumn(), self::normalizeEmail($email));
+    }
+
+    /**
+     * @param  Builder<Suppression>  $query
+     * @param  iterable<int, string>  $emails
+     */
+    public function scopeWhereNormalizedEmailIn(Builder $query, iterable $emails): void
+    {
+        $query->whereIn($this->normalizedEmailColumn(), $this->normalizeEmails($emails));
+    }
+
+    /**
+     * @param  Builder<Suppression>  $query
+     * @param  iterable<int, string>  $emails
+     */
+    public function scopeWhereNormalizedEmailNotIn(Builder $query, iterable $emails): void
+    {
+        $query->whereNotIn($this->normalizedEmailColumn(), $this->normalizeEmails($emails));
+    }
+
+    /**
+     * @param  Builder<Suppression>  $query
+     */
     public function scopeActive(Builder $query): void
     {
         $query->where(function (Builder $query): void {
@@ -79,5 +105,25 @@ class Suppression extends Model
     public function emailMessage(): BelongsTo
     {
         return $this->belongsTo(Email::class, 'email_id');
+    }
+
+    private function normalizedEmailColumn(): string
+    {
+        return in_array($this->getConnection()->getDriverName(), ['mysql', 'mariadb', 'sqlsrv'], true)
+            ? 'email_normalized'
+            : 'email';
+    }
+
+    /**
+     * @param  iterable<int, string>  $emails
+     * @return array<int, string>
+     */
+    private function normalizeEmails(iterable $emails): array
+    {
+        return collect($emails)
+            ->map(fn (string $email): string => self::normalizeEmail($email))
+            ->uniqueStrict()
+            ->values()
+            ->all();
     }
 }

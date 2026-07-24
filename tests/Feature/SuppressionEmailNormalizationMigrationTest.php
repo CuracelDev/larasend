@@ -410,3 +410,96 @@ it('uses binary indexed values and replaces the conflicting legacy unique index 
         ->toContain('dropUnique(self::ORIGINAL_UNIQUE_INDEX)')
         ->toContain("unique(['project_id', 'email'], self::ORIGINAL_UNIQUE_INDEX)");
 });
+
+it('applies the SQL Server binary collation to the normalization input', function () {
+    $migrationSource = file_get_contents(suppressionEmailNormalizationMigrationFile());
+
+    expect($migrationSource)
+        ->toContain("'TRIM(email COLLATE Latin1_General_100_BIN2)'")
+        ->not->toContain("\$this->normalizedEmailExpression().' COLLATE Latin1_General_100_BIN2'")
+        ->toContain("'email_normalized'")
+        ->not->toContain("'normalized_email'");
+});
+
+it('routes every runtime suppression predicate through the driver normalized key', function () {
+    $modelSource = file_get_contents(app_path('Models/Suppression.php'));
+    $sendServiceSource = file_get_contents(app_path('Services/EmailSendService.php'));
+    $syncJobSource = file_get_contents(app_path('Jobs/SyncCloudflareSourceSuppressions.php'));
+    $sesNormalizerSource = file_get_contents(app_path('Services/SesEventNormalizer.php'));
+
+    $query = Suppression::query()->whereNormalizedEmailIn([
+        ' ASCII@Example.com ',
+        'ÄBC@Example.com',
+    ]);
+
+    expect($query->toSql())
+        ->toContain('"email" in (?, ?)')
+        ->and($query->getBindings())->toBe([
+            'ascii@example.com',
+            'Äbc@example.com',
+        ])
+        ->and($modelSource)
+        ->toContain("'email_normalized'")
+        ->toContain("'mysql', 'mariadb', 'sqlsrv'")
+        ->and($sendServiceSource)
+        ->toContain('->whereNormalizedEmailIn($recipients)')
+        ->not->toContain("->whereIn('email', \$recipients)")
+        ->and($syncJobSource)
+        ->toContain('->whereNormalizedEmail($email)')
+        ->toContain('->whereNormalizedEmailNotIn($syncedEmails)')
+        ->not->toContain("->whereNotIn('email', \$syncedEmails)")
+        ->and($sesNormalizerSource)
+        ->toContain('WITH (HOLDLOCK)')
+        ->toContain('[email_normalized]')
+        ->toMatch('/\\[target\\]\\.\\[project_id\\].*\\[target\\]\\.\\[email_normalized\\]/s');
+});
+
+it('preflights legacy collation conflicts without partially changing the schema', function () {
+    config()->set('database.connections.suppression_rollback_test', [
+        'driver' => 'sqlite',
+        'database' => ':memory:',
+        'foreign_key_constraints' => true,
+    ]);
+
+    $connection = DB::connection('suppression_rollback_test');
+
+    try {
+        $connection->statement(
+            'CREATE TABLE suppressions ('
+            .'id INTEGER PRIMARY KEY AUTOINCREMENT, '
+            .'project_id INTEGER NOT NULL, '
+            .'email TEXT COLLATE NOCASE NOT NULL, '
+            .'email_normalized TEXT'
+            .')',
+        );
+        $connection->table('suppressions')->insert([
+            ['project_id' => 7, 'email' => 'Case@Example.com'],
+            ['project_id' => 7, 'email' => 'case@example.com'],
+        ]);
+
+        $columnsBefore = $connection->getSchemaBuilder()->getColumnListing('suppressions');
+        $rowsBefore = $connection->table('suppressions')->orderBy('id')->get()->all();
+        $migration = suppressionEmailNormalizationMigration();
+        $preflight = new ReflectionMethod($migration, 'assertLegacyUniqueIndexCanBeRestored');
+
+        expect(fn () => $preflight->invoke($migration, $connection))
+            ->toThrow(RuntimeException::class, 'Legacy suppression uniqueness cannot be restored');
+
+        expect($connection->getSchemaBuilder()->getColumnListing('suppressions'))
+            ->toBe($columnsBefore)
+            ->and($connection->table('suppressions')->orderBy('id')->get()->all())
+            ->toEqual($rowsBefore);
+    } finally {
+        DB::purge('suppression_rollback_test');
+    }
+});
+
+it('runs the rollback conflict preflight before destructive driver DDL', function () {
+    $migrationSource = file_get_contents(suppressionEmailNormalizationMigrationFile());
+    $preflightPosition = strpos($migrationSource, '$this->assertLegacyUniqueIndexCanBeRestored');
+    $mysqlDdlPosition = strpos($migrationSource, "'ALTER TABLE `suppressions`'");
+
+    expect($preflightPosition)->not->toBeFalse()
+        ->and($mysqlDdlPosition)->not->toBeFalse()
+        ->and($preflightPosition)->toBeLessThan($mysqlDdlPosition);
+});

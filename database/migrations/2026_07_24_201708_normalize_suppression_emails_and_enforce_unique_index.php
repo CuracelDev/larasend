@@ -1,6 +1,7 @@
 <?php
 
 use Carbon\CarbonImmutable;
+use Illuminate\Database\ConnectionInterface;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Collection;
@@ -36,13 +37,18 @@ return new class extends Migration
      */
     public function down(): void
     {
-        $driver = DB::connection()->getDriverName();
+        $connection = DB::connection();
+        $driver = $connection->getDriverName();
+
+        if (in_array($driver, ['mysql', 'mariadb', 'sqlsrv'], true)) {
+            $this->assertLegacyUniqueIndexCanBeRestored($connection);
+        }
 
         if (in_array($driver, ['mysql', 'mariadb'], true)) {
             DB::statement(
                 'ALTER TABLE `suppressions`'
                 .' DROP INDEX `'.self::NORMALIZED_UNIQUE_INDEX.'`,'
-                .' DROP COLUMN `normalized_email`,'
+                .' DROP COLUMN `email_normalized`,'
                 .' ADD UNIQUE INDEX `'.self::ORIGINAL_UNIQUE_INDEX.'` (`project_id`, `email`)',
             );
 
@@ -52,7 +58,7 @@ return new class extends Migration
         if ($driver === 'sqlsrv') {
             Schema::table('suppressions', function (Blueprint $table): void {
                 $table->dropUnique(self::NORMALIZED_UNIQUE_INDEX);
-                $table->dropColumn('normalized_email');
+                $table->dropColumn('email_normalized');
                 $table->unique(['project_id', 'email'], self::ORIGINAL_UNIQUE_INDEX);
             });
 
@@ -66,6 +72,26 @@ return new class extends Migration
         }
 
         throw new RuntimeException("Unsupported database driver [{$driver}].");
+    }
+
+    private function assertLegacyUniqueIndexCanBeRestored(ConnectionInterface $connection): void
+    {
+        $conflict = $connection->table('suppressions')
+            ->select('project_id')
+            ->selectRaw('MIN(email) AS email')
+            ->groupBy('project_id', 'email')
+            ->havingRaw('COUNT(*) > 1')
+            ->first();
+
+        if ($conflict === null) {
+            return;
+        }
+
+        throw new RuntimeException(
+            'Legacy suppression uniqueness cannot be restored losslessly because '
+            ."project [{$conflict->project_id}] contains email values that collide under the legacy database collation. "
+            .'Remove or consolidate those suppression rows before rolling back this migration.',
+        );
     }
 
     private function consolidateCaseVariants(CarbonImmutable $migrationStartedAt): void
@@ -181,9 +207,9 @@ return new class extends Migration
             DB::statement(
                 'ALTER TABLE `suppressions`'
                 .' DROP INDEX `'.self::ORIGINAL_UNIQUE_INDEX.'`,'
-                .' ADD COLUMN `normalized_email` VARBINARY(1020)'
+                .' ADD COLUMN `email_normalized` VARBINARY(1020)'
                 ." GENERATED ALWAYS AS (CAST({$normalizedEmailExpression} AS BINARY)) STORED,"
-                .' ADD UNIQUE INDEX `'.self::NORMALIZED_UNIQUE_INDEX.'` (`project_id`, `normalized_email`)',
+                .' ADD UNIQUE INDEX `'.self::NORMALIZED_UNIQUE_INDEX.'` (`project_id`, `email_normalized`)',
             );
 
             return;
@@ -193,11 +219,11 @@ return new class extends Migration
             Schema::table('suppressions', function (Blueprint $table): void {
                 $table->dropUnique(self::ORIGINAL_UNIQUE_INDEX);
                 $table->computed(
-                    'normalized_email',
-                    $this->normalizedEmailExpression().' COLLATE Latin1_General_100_BIN2',
+                    'email_normalized',
+                    $this->normalizedEmailExpression(),
                 )
                     ->persisted();
-                $table->unique(['project_id', 'normalized_email'], self::NORMALIZED_UNIQUE_INDEX);
+                $table->unique(['project_id', 'email_normalized'], self::NORMALIZED_UNIQUE_INDEX);
             });
 
             return;
@@ -212,7 +238,9 @@ return new class extends Migration
      */
     private function normalizedEmailExpression(): string
     {
-        $expression = 'TRIM(email)';
+        $expression = DB::connection()->getDriverName() === 'sqlsrv'
+            ? 'TRIM(email COLLATE Latin1_General_100_BIN2)'
+            : 'TRIM(email)';
 
         foreach (range('A', 'Z') as $uppercase) {
             $expression = sprintf(
