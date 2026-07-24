@@ -520,8 +520,8 @@ it('does not prune when the source job exhausts its total work budget', function
     $this->assertModelExists($suppression);
 });
 
-it('aborts a suppression snapshot that exceeds the safe page limit', function () {
-    [, $source] = cloudflareSuppressionSource('cf-page-limit', 'acc-page-limit');
+it('completes a suppression list on a partial one hundredth data page', function () {
+    [, $source] = cloudflareSuppressionSource('cf-partial-page-limit', 'acc-partial-page-limit');
     $fullPage = [
         'success' => true,
         'result' => collect(range(1, 100))
@@ -536,18 +536,112 @@ it('aborts a suppression snapshot that exceeds the safe page limit', function ()
     ];
     $sequence = Http::sequence();
 
-    foreach (range(1, CloudflareApiClient::SUPPRESSION_MAX_PAGES_PER_SNAPSHOT) as $page) {
+    foreach (range(1, 99) as $page) {
         $sequence->push($fullPage);
     }
 
-    Http::fake([
-        'https://api.cloudflare.com/client/v4/accounts/acc-page-limit/email/sending/suppression*' => $sequence,
+    $sequence->push([
+        'success' => true,
+        'result' => [[
+            'id' => 'last-partial',
+            'email' => 'last-partial@example.com',
+            'reason' => 'hard_bounce',
+            'created_at' => now()->toIso8601String(),
+            'expires_at' => null,
+        ]],
     ]);
 
-    expect(fn () => app(CloudflareApiClient::class)->listStableSuppressions($source, 60))
-        ->toThrow(RuntimeException::class, 'safe page limit');
+    Http::fake([
+        'https://api.cloudflare.com/client/v4/accounts/acc-partial-page-limit/email/sending/suppression*' => $sequence,
+    ]);
 
-    Http::assertSentCount(CloudflareApiClient::SUPPRESSION_MAX_PAGES_PER_SNAPSHOT);
+    $suppressions = app(CloudflareApiClient::class)->listSuppressions($source);
+
+    expect($suppressions)->toHaveCount(9901)
+        ->and($suppressions[9900]['email'])->toBe('last-partial@example.com');
+
+    Http::assertSentCount(100);
+});
+
+it('allows a terminal empty request after one hundred full data pages', function () {
+    [, $source] = cloudflareSuppressionSource('cf-terminal-page', 'acc-terminal-page');
+    $fullPage = [
+        'success' => true,
+        'result' => collect(range(1, 100))
+            ->map(fn (int $index): array => [
+                'id' => "suppression-{$index}",
+                'email' => "recipient-{$index}@example.com",
+                'reason' => 'hard_bounce',
+                'created_at' => now()->toIso8601String(),
+                'expires_at' => null,
+            ])
+            ->all(),
+    ];
+    $sequence = Http::sequence();
+
+    foreach (range(1, 100) as $page) {
+        $sequence->push($fullPage);
+    }
+
+    $sequence->push(['success' => true, 'result' => []]);
+
+    Http::fake([
+        'https://api.cloudflare.com/client/v4/accounts/acc-terminal-page/email/sending/suppression*' => $sequence,
+    ]);
+
+    expect(app(CloudflareApiClient::class)->listSuppressions($source))->toHaveCount(10000);
+
+    Http::assertSentCount(101);
+});
+
+it('rejects a true one hundred and first data page without pruning', function () {
+    [$project, $source] = cloudflareSuppressionSource('cf-overflow-page', 'acc-overflow-page');
+    $suppression = Suppression::create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email' => 'overflow-preserved@example.com',
+        'reason' => 'hard_bounce',
+        'event_type' => 'provider_sync',
+    ]);
+    $fullPage = [
+        'success' => true,
+        'result' => collect(range(1, 100))
+            ->map(fn (int $index): array => [
+                'id' => "suppression-{$index}",
+                'email' => "recipient-{$index}@example.com",
+                'reason' => 'hard_bounce',
+                'created_at' => now()->toIso8601String(),
+                'expires_at' => null,
+            ])
+            ->all(),
+    ];
+    $sequence = Http::sequence();
+
+    foreach (range(1, 100) as $page) {
+        $sequence->push($fullPage);
+    }
+
+    $sequence->push([
+        'success' => true,
+        'result' => [[
+            'id' => 'overflow',
+            'email' => 'overflow@example.com',
+            'reason' => 'hard_bounce',
+            'created_at' => now()->toIso8601String(),
+            'expires_at' => null,
+        ]],
+    ]);
+
+    Http::fake([
+        'https://api.cloudflare.com/client/v4/accounts/acc-overflow-page/email/sending/suppression*' => $sequence,
+    ]);
+
+    expect(fn () => runCloudflareSuppressionSourceSync($source))
+        ->toThrow(RuntimeException::class, 'data page limit');
+
+    Http::assertSentCount(101);
+    $this->assertModelExists($suppression);
 });
 
 it('has bounded unique source execution and a non-overlapping dispatcher schedule', function () {

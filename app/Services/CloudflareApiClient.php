@@ -11,7 +11,9 @@ use RuntimeException;
 
 class CloudflareApiClient
 {
-    public const SUPPRESSION_MAX_PAGES_PER_SNAPSHOT = 100;
+    public const SUPPRESSION_MAX_DATA_PAGES = 100;
+
+    private const SUPPRESSION_PAGE_SIZE = 100;
 
     /**
      * @return array{value: int|float|null, unit: string|null}
@@ -49,14 +51,10 @@ class CloudflareApiClient
         $page = 1;
 
         do {
-            if ($page > self::SUPPRESSION_MAX_PAGES_PER_SNAPSHOT) {
-                throw new RuntimeException('Cloudflare suppression pagination exceeded its safe page limit. No destructive changes were made.');
-            }
-
             [$requestTimeout, $connectTimeout] = $this->suppressionRequestTimeouts($deadline);
             $response = $this->request($source, $requestTimeout, $connectTimeout)->get('/email/sending/suppression', [
                 'page' => $page,
-                'per_page' => 100,
+                'per_page' => self::SUPPRESSION_PAGE_SIZE,
                 'order' => 'created_at',
                 'direction' => 'asc',
             ]);
@@ -70,6 +68,10 @@ class CloudflareApiClient
                 throw new RuntimeException('Cloudflare returned an invalid suppression list response.');
             }
 
+            if ($page > self::SUPPRESSION_MAX_DATA_PAGES && $results !== []) {
+                throw new RuntimeException('Cloudflare suppression pagination exceeded its safe data page limit. No destructive changes were made.');
+            }
+
             foreach ($results as $suppression) {
                 $suppressions[] = [
                     'id' => (string) ($suppression['id'] ?? ''),
@@ -81,7 +83,8 @@ class CloudflareApiClient
             }
 
             $page++;
-        } while ($results !== []);
+        } while ($results !== []
+            && ($page <= self::SUPPRESSION_MAX_DATA_PAGES || count($results) === self::SUPPRESSION_PAGE_SIZE));
 
         return $suppressions;
     }
