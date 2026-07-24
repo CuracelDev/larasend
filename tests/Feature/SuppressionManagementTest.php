@@ -84,10 +84,10 @@ it('allows an owner to remove an SES suppression from the provider and project',
     Http::assertSent(function (Request $request): bool {
         $expectedAuthorization = 'AWS4-HMAC-SHA256 Credential=test-access-key/20300102/us-east-1/ses/aws4_request, '
             .'SignedHeaders=content-type;host;x-amz-date, '
-            .'Signature=0649cdec45840e86b0bc4dd45e22f29959c0c612c2480022955966414a0ea0d7';
+            .'Signature=6c8e05635fbe79e963dc68d2bde55ac5c832128aad7af9afd6a1f8f2a1fbc188';
 
         return $request->method() === 'DELETE'
-            && str_ends_with($request->url(), '/v2/email/suppression/addresses/Owner.Blocked%40example.com')
+            && str_ends_with($request->url(), '/v2/email/suppression/addresses/owner.blocked%40example.com')
             && $request->header('X-Amz-Date')[0] === '20300102T030405Z'
             && $request->header('Authorization')[0] === $expectedAuthorization;
     });
