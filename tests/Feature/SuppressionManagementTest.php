@@ -1,0 +1,261 @@
+<?php
+
+use App\Models\ApiKey;
+use App\Models\Project;
+use App\Models\Source;
+use App\Models\Suppression;
+use App\Models\User;
+use App\Models\Workspace;
+use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\Http;
+
+/**
+ * @return array{User, Workspace, Project, Source}
+ */
+function suppressionManagementFixture(string $slug, string $provider = 'ses'): array
+{
+    $owner = User::factory()->create();
+    $workspace = Workspace::create([
+        'owner_id' => $owner->id,
+        'name' => str($slug)->headline()->toString(),
+        'slug' => $slug,
+    ]);
+    $workspace->users()->attach($owner, ['role' => 'owner']);
+    $project = Project::create([
+        'workspace_id' => $workspace->id,
+        'name' => str($slug)->headline()->toString(),
+        'slug' => $slug,
+    ]);
+    $source = Source::create([
+        'project_id' => $project->id,
+        'name' => 'Production',
+        'environment' => 'prod',
+        'provider' => $provider,
+        'ses_region' => 'us-east-1',
+        'aws_access_key_id' => 'test-access-key',
+        'aws_secret_access_key' => 'test-secret-key',
+        'cloudflare_api_token' => $provider === 'cloudflare' ? 'test-cloudflare-token' : null,
+        'cloudflare_account_id' => $provider === 'cloudflare' ? "account-{$slug}" : null,
+        'webhook_token' => 'token-'.str()->random(8),
+    ]);
+
+    return [$owner, $workspace, $project, $source];
+}
+
+function managedSuppression(Project $project, ?Source $source, string $email = 'blocked@example.com'): Suppression
+{
+    return Suppression::create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => $source?->id,
+        'email' => $email,
+        'reason' => 'hard_bounce',
+        'event_type' => 'bounce',
+    ]);
+}
+
+it('allows an owner to remove an SES suppression from the provider and project', function () {
+    Http::preventStrayRequests();
+    Http::fake([
+        'https://email.us-east-1.amazonaws.com/v2/email/suppression/addresses/*' => Http::response(status: 204),
+    ]);
+
+    [$owner, , $project, $source] = suppressionManagementFixture('owner-removal');
+    $suppression = managedSuppression($project, $source, 'Owner.Blocked@example.com');
+
+    $this->actingAs($owner)
+        ->get("/projects/{$project->slug}/suppressions")
+        ->assertSuccessful()
+        ->assertInertia(fn ($page) => $page
+            ->where('workspace.can_manage_suppressions', true)
+        );
+
+    $this->actingAs($owner)
+        ->delete("/projects/{$project->slug}/suppressions/{$suppression->id}")
+        ->assertRedirect("/projects/{$project->slug}/suppressions");
+
+    $this->assertModelMissing($suppression);
+
+    Http::assertSent(fn (Request $request): bool => $request->method() === 'DELETE'
+        && str_ends_with($request->url(), '/v2/email/suppression/addresses/Owner.Blocked%40example.com')
+        && str_starts_with((string) $request->header('Authorization')[0], 'AWS4-HMAC-SHA256 '));
+});
+
+it('allows a member to remove an SES suppression when the provider already removed it', function () {
+    Http::preventStrayRequests();
+    Http::fake([
+        'https://email.us-east-1.amazonaws.com/v2/email/suppression/addresses/*' => Http::response([
+            'message' => 'Email address was not found.',
+        ], 404),
+    ]);
+
+    [, $workspace, $project, $source] = suppressionManagementFixture('member-removal');
+    $member = User::factory()->create();
+    $workspace->users()->attach($member, ['role' => 'member']);
+    $suppression = managedSuppression($project, $source);
+
+    $this->actingAs($member)
+        ->delete("/suppressions/{$suppression->id}")
+        ->assertRedirect('/suppressions');
+
+    $this->assertModelMissing($suppression);
+});
+
+it('forbids a sender from removing suppressions', function () {
+    [, $workspace, $project, $source] = suppressionManagementFixture('sender-forbidden');
+    $sender = User::factory()->create();
+    $workspace->users()->attach($sender, ['role' => 'sender']);
+    $suppression = managedSuppression($project, $source);
+
+    $this->actingAs($sender)
+        ->get("/projects/{$project->slug}/suppressions")
+        ->assertSuccessful()
+        ->assertInertia(fn ($page) => $page
+            ->where('workspace.can_manage_suppressions', false)
+        );
+
+    $this->actingAs($sender)
+        ->delete("/projects/{$project->slug}/suppressions/{$suppression->id}")
+        ->assertForbidden();
+
+    $this->assertModelExists($suppression);
+});
+
+it('returns not found for a suppression outside the selected web project', function () {
+    [$owner, $workspace, $project] = suppressionManagementFixture('web-project-one');
+    $otherProject = Project::create([
+        'workspace_id' => $workspace->id,
+        'name' => 'Project Two',
+        'slug' => 'web-project-two',
+    ]);
+    $suppression = managedSuppression($otherProject, null);
+
+    $this->actingAs($owner)
+        ->delete("/projects/{$project->slug}/suppressions/{$suppression->id}")
+        ->assertNotFound();
+
+    $this->assertModelExists($suppression);
+});
+
+it('preserves a suppression when SES refuses provider removal', function () {
+    Http::preventStrayRequests();
+    Http::fake([
+        'https://email.us-east-1.amazonaws.com/v2/email/suppression/addresses/*' => Http::response([
+            'message' => 'Access denied.',
+        ], 403),
+    ]);
+
+    [$owner, , $project, $source] = suppressionManagementFixture('ses-failure');
+    $suppression = managedSuppression($project, $source);
+
+    $response = $this->actingAs($owner)
+        ->from("/projects/{$project->slug}/suppressions")
+        ->delete("/projects/{$project->slug}/suppressions/{$suppression->id}");
+
+    $response
+        ->assertRedirect("/projects/{$project->slug}/suppressions")
+        ->assertSessionHasErrors('suppression');
+
+    expect(session('inertia.flash_data')['toast']['type'])->toBe('error');
+    $this->assertModelExists($suppression);
+});
+
+it('refuses local Cloudflare removal while the address remains upstream', function () {
+    Http::preventStrayRequests();
+    [$owner, , $project, $source] = suppressionManagementFixture('cloudflare-present', 'cloudflare');
+    $suppression = managedSuppression($project, $source);
+
+    Http::fake([
+        'https://api.cloudflare.com/client/v4/accounts/account-cloudflare-present/email/sending/suppression*' => Http::sequence()
+            ->push([
+                'success' => true,
+                'result' => [
+                    [
+                        'id' => 'suppression-1',
+                        'email' => 'BLOCKED@example.com',
+                        'reason' => 'hard_bounce',
+                        'created_at' => now()->toIso8601String(),
+                        'expires_at' => null,
+                    ],
+                ],
+            ])
+            ->push(['success' => true, 'result' => []]),
+    ]);
+
+    $this->actingAs($owner)
+        ->from("/projects/{$project->slug}/suppressions")
+        ->delete("/projects/{$project->slug}/suppressions/{$suppression->id}")
+        ->assertRedirect("/projects/{$project->slug}/suppressions")
+        ->assertSessionHasErrors('suppression');
+
+    expect(session('errors')->get('suppression')[0])
+        ->toContain('Cloudflare')
+        ->toContain('upstream');
+    $this->assertModelExists($suppression);
+});
+
+it('removes the local Cloudflare blocker after a complete list confirms it is absent', function () {
+    Http::preventStrayRequests();
+    [$owner, , $project, $source] = suppressionManagementFixture('cloudflare-absent', 'cloudflare');
+    $suppression = managedSuppression($project, $source);
+
+    Http::fake([
+        'https://api.cloudflare.com/client/v4/accounts/account-cloudflare-absent/email/sending/suppression*' => Http::sequence()
+            ->push([
+                'success' => true,
+                'result' => [
+                    [
+                        'id' => 'suppression-2',
+                        'email' => 'someone-else@example.com',
+                        'reason' => 'hard_bounce',
+                        'created_at' => now()->toIso8601String(),
+                        'expires_at' => null,
+                    ],
+                ],
+            ])
+            ->push(['success' => true, 'result' => []]),
+    ]);
+
+    $this->actingAs($owner)
+        ->delete("/projects/{$project->slug}/suppressions/{$suppression->id}")
+        ->assertRedirect("/projects/{$project->slug}/suppressions");
+
+    $this->assertModelMissing($suppression);
+});
+
+it('requires the manage suppressions scope for the API delete route', function () {
+    [, , $project, $source] = suppressionManagementFixture('api-scope');
+    $suppression = managedSuppression($project, null);
+    $readKey = ApiKey::issue($project, 'Read key', $source, ['read:activity']);
+    $manageKey = ApiKey::issue($project, 'Manage key', $source, ['manage:suppressions']);
+
+    $this->withToken($readKey['plain_text'])
+        ->deleteJson("/api/suppressions/{$suppression->id}")
+        ->assertForbidden()
+        ->assertJsonPath('message', 'This Larasend API key is missing the manage:suppressions scope.');
+
+    $this->assertModelExists($suppression);
+
+    $this->withToken($manageKey['plain_text'])
+        ->deleteJson("/api/suppressions/{$suppression->id}")
+        ->assertNoContent();
+
+    $this->assertModelMissing($suppression);
+});
+
+it('returns not found when an API key targets another project suppression', function () {
+    [, $workspace, $project, $source] = suppressionManagementFixture('api-project-one');
+    $otherProject = Project::create([
+        'workspace_id' => $workspace->id,
+        'name' => 'API Project Two',
+        'slug' => 'api-project-two',
+    ]);
+    $suppression = managedSuppression($otherProject, null);
+    $issued = ApiKey::issue($project, 'Manage key', $source, ['manage:suppressions']);
+
+    $this->withToken($issued['plain_text'])
+        ->deleteJson("/api/suppressions/{$suppression->id}")
+        ->assertNotFound();
+
+    $this->assertModelExists($suppression);
+});

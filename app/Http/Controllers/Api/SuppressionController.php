@@ -1,0 +1,34 @@
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use App\Exceptions\SuppressionRemovalException;
+use App\Http\Controllers\Controller;
+use App\Models\Project;
+use App\Models\Suppression;
+use App\Services\SuppressionRemovalService;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Http\Response;
+
+class SuppressionController extends Controller
+{
+    public function destroy(
+        Request $request,
+        Suppression $suppression,
+        SuppressionRemovalService $removalService,
+    ): Response|JsonResponse {
+        /** @var Project $project */
+        $project = $request->attributes->get('larasend_project');
+
+        abort_unless($suppression->project_id === $project->id, 404);
+
+        try {
+            $removalService->remove($suppression);
+        } catch (SuppressionRemovalException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 422);
+        }
+
+        return response()->noContent();
+    }
+}

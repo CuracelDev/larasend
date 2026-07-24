@@ -84,6 +84,7 @@ class ActivityController extends Controller
                 'can_manage_members' => $project->workspace->canManageMembers($user),
                 'can_manage_api_keys' => $project->workspace->canManageApiKeys($user),
                 'can_manage_domains' => $project->workspace->canManageDomains($user),
+                'can_manage_suppressions' => $project->workspace->canManageSuppressions($user),
                 'can_send' => $project->workspace->canSendEmail($user),
             ],
             'workspaceMembers' => $this->workspaceMembers($project),

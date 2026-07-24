@@ -106,6 +106,7 @@ ses:SendEmail
 ses:CreateEmailIdentity
 ses:GetEmailIdentity
 ses:GetAccount
+ses:DeleteSuppressedDestination
 ```
 
 Recommended setup:

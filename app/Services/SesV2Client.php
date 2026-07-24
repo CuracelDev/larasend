@@ -86,6 +86,26 @@ class SesV2Client
         return $response->json();
     }
 
+    public function deleteSuppressedDestination(Source $source, string $email): void
+    {
+        $target = "https://email.{$source->ses_region}.amazonaws.com/v2/email/suppression/addresses/".rawurlencode($email);
+        $payload = '';
+        $headers = $this->signedHeaders($source, 'DELETE', $target, $payload);
+        $response = Http::withHeaders($headers)
+            ->timeout(15)
+            ->delete($target);
+
+        try {
+            $response->throw();
+        } catch (RequestException $exception) {
+            if ($exception->response?->notFound()) {
+                return;
+            }
+
+            throw $exception;
+        }
+    }
+
     /**
      * The explicit Destination is required for Bcc delivery: Symfony Mime
      * strips the Bcc header from the raw message, so SES cannot derive
