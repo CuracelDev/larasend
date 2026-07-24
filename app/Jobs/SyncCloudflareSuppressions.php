@@ -48,12 +48,17 @@ class SyncCloudflareSuppressions implements ShouldQueue
             return;
         }
 
-        foreach ($cloudflare->listSuppressions($source) as $suppression) {
+        $suppressions = $cloudflare->listSuppressions($source);
+        $syncedEmails = [];
+
+        foreach ($suppressions as $suppression) {
             $email = Str::lower(trim($suppression['email']));
 
             if ($email === '') {
                 continue;
             }
+
+            $syncedEmails[] = $email;
 
             Suppression::query()->updateOrCreate(
                 [
@@ -70,6 +75,18 @@ class SyncCloudflareSuppressions implements ShouldQueue
                 ],
             );
         }
+
+        $providerSyncSuppressions = $project->suppressions()
+            ->where('source_id', $source->id)
+            ->where('event_type', 'provider_sync');
+
+        if ($syncedEmails === []) {
+            $providerSyncSuppressions->delete();
+
+            return;
+        }
+
+        $providerSyncSuppressions->whereNotIn('email', $syncedEmails)->delete();
     }
 
     private function mapReason(string $reason): string

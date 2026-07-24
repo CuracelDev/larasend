@@ -217,6 +217,7 @@ class EmailSendService
         }
 
         $suppressed = $project->suppressions()
+            ->active()
             ->whereIn('email', $recipients)
             ->pluck('email')
             ->map(fn (string $email): string => Str::lower($email))

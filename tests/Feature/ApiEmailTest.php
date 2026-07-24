@@ -257,6 +257,52 @@ it('blocks sends to suppressed recipients', function () {
     Queue::assertNothingPushed();
 });
 
+it('allows sends to expired suppressions but blocks active suppressions', function () {
+    [$workspace, $project, $source, $token] = larasendProjectFixture();
+
+    Queue::fake();
+
+    Suppression::create([
+        'workspace_id' => $workspace->id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email' => 'expired@example.com',
+        'reason' => 'hard_bounce',
+        'event_type' => 'bounce',
+        'expires_at' => now()->subMinute(),
+    ]);
+
+    $this->withToken($token)->postJson('/api/emails', [
+        'from' => 'Larasend <receipts@example.com>',
+        'to' => ['Expired <expired@example.com>'],
+        'subject' => 'Expired suppression',
+        'html' => '<h1>Hello</h1>',
+        'text' => 'Hello',
+    ])->assertAccepted();
+
+    Suppression::create([
+        'workspace_id' => $workspace->id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email' => 'active@example.com',
+        'reason' => 'complaint',
+        'event_type' => 'complaint',
+        'expires_at' => now()->addMinute(),
+    ]);
+
+    $this->withToken($token)->postJson('/api/emails', [
+        'from' => 'Larasend <receipts@example.com>',
+        'to' => ['Active <active@example.com>'],
+        'subject' => 'Active suppression',
+        'html' => '<h1>Hello</h1>',
+        'text' => 'Hello',
+    ])->assertUnprocessable()
+        ->assertJsonValidationErrors('to');
+
+    expect(Email::query()->where('subject', 'Expired suppression')->exists())->toBeTrue()
+        ->and(Email::query()->where('subject', 'Active suppression')->exists())->toBeFalse();
+});
+
 it('lists and shows only emails scoped to the api key project', function () {
     [$workspace, $project, $source, $token] = larasendProjectFixture();
 

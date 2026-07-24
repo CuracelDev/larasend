@@ -49,6 +49,42 @@ it('renders the activity dashboard for authenticated users', function () {
         );
 });
 
+it('returns active suppression metadata and statistics', function () {
+    $user = User::factory()->create();
+    $project = seedActivityDashboardData($user);
+    $source = $project->sources()->firstOrFail();
+    $expiredAt = now()->subDay()->startOfSecond();
+
+    Suppression::query()->create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email' => 'expired@example.com',
+        'reason' => 'hard_bounce',
+        'event_type' => 'provider_sync',
+        'expires_at' => $expiredAt,
+    ]);
+
+    $this->actingAs($user)
+        ->get('/suppressions')
+        ->assertSuccessful()
+        ->assertInertia(fn ($page) => $page
+            ->where('suppressionStats', [
+                'active' => 2,
+                'hard_bounce' => 1,
+                'complaint' => 1,
+                'expired' => 1,
+            ])
+            ->where('sidebarCounts.suppressions', 2)
+            ->where('suppressions', fn ($suppressions) => collect($suppressions)->contains(fn (array $suppression) => $suppression['email'] === 'expired@example.com'
+                && $suppression['active'] === false
+                && $suppression['expires_at'] === $expiredAt->toIso8601String())
+                && collect($suppressions)->contains(fn (array $suppression) => $suppression['email'] === 'ana.delpino@gmail.com'
+                    && $suppression['active'] === true
+                    && $suppression['expires_at'] === null))
+        );
+});
+
 it('renders recent active inbox conversations on the dashboard', function () {
     $user = User::factory()->create();
     $project = seedActivityDashboardData($user);
@@ -406,6 +442,39 @@ it('filters activity by search query and exports csv', function () {
     expect($export->streamedContent())
         ->toContain('Message ID')
         ->toContain('maya.okafor@northwind.io');
+});
+
+it('exports suppression rows with formula-safe values', function () {
+    $user = User::factory()->create();
+    $project = seedActivityDashboardData($user);
+    $source = $project->sources()->firstOrFail();
+
+    Suppression::query()->create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email' => '=recipient@example.com',
+        'reason' => '+reason',
+        'event_type' => '@provider_sync',
+        'expires_at' => now()->subDay(),
+    ]);
+
+    $export = $this->actingAs($user)
+        ->get('/activity/export?section=suppressions')
+        ->assertSuccessful()
+        ->assertHeader('content-type', 'text/csv; charset=UTF-8')
+        ->assertHeader('content-disposition', 'attachment; filename=larasend-suppressions.csv');
+
+    $content = $export->streamedContent();
+
+    expect(str_getcsv(strtok($content, "\n")))
+        ->toBe(['Recipient', 'Reason', 'Source', 'Added at', 'Expires at', 'Status']);
+
+    expect($content)
+        ->toContain("'=recipient@example.com")
+        ->toContain("'+reason")
+        ->toContain("'@provider_sync")
+        ->toContain('Expired');
 });
 
 it('allows workspace users to download raw mime content', function () {

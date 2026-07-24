@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -26,6 +27,17 @@ class Suppression extends Model
         return [
             'expires_at' => 'datetime',
         ];
+    }
+
+    /**
+     * @param  Builder<Suppression>  $query
+     */
+    public function scopeActive(Builder $query): void
+    {
+        $query->where(function (Builder $query): void {
+            $query->whereNull('expires_at')
+                ->orWhere('expires_at', '>', now());
+        });
     }
 
     public function workspace(): BelongsTo

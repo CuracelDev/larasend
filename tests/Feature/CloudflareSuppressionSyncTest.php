@@ -87,6 +87,79 @@ it('is idempotent across repeated sync runs', function () {
     expect(Suppression::query()->where('email', 'repeat@example.com')->count())->toBe(1);
 });
 
+it('prunes missing provider sync suppressions only for the successfully fetched source', function () {
+    [$project, $source] = cloudflareSuppressionSource('cf-prune', 'acc-prune');
+    $otherSource = Source::create([
+        'project_id' => $project->id,
+        'name' => 'Historical source',
+        'environment' => 'staging',
+        'provider' => 'ses',
+        'webhook_token' => 'token-'.str()->random(8),
+    ]);
+
+    $missingUpstream = Suppression::create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email' => 'missing-upstream@example.com',
+        'reason' => 'hard_bounce',
+        'event_type' => 'provider_sync',
+    ]);
+    $otherSourceSuppression = Suppression::create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => $otherSource->id,
+        'email' => 'other-source@example.com',
+        'reason' => 'hard_bounce',
+        'event_type' => 'provider_sync',
+    ]);
+    $localSuppression = Suppression::create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email' => 'local-event@example.com',
+        'reason' => 'complaint',
+        'event_type' => 'complaint',
+    ]);
+
+    Http::fake([
+        'https://api.cloudflare.com/client/v4/accounts/acc-prune/email/sending/suppression*' => Http::response([
+            'success' => true,
+            'result' => [],
+        ]),
+    ]);
+
+    (new SyncCloudflareSuppressions)->handle(app(CloudflareApiClient::class));
+
+    expect($missingUpstream->fresh())->toBeNull()
+        ->and($otherSourceSuppression->fresh())->not->toBeNull()
+        ->and($localSuppression->fresh())->not->toBeNull();
+});
+
+it('preserves provider sync suppressions when the Cloudflare fetch fails', function () {
+    [$project, $source] = cloudflareSuppressionSource('cf-preserve', 'acc-preserve');
+
+    $suppression = Suppression::create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email' => 'still-suppressed@example.com',
+        'reason' => 'hard_bounce',
+        'event_type' => 'provider_sync',
+    ]);
+
+    Http::fake([
+        'https://api.cloudflare.com/client/v4/accounts/acc-preserve/email/sending/suppression*' => Http::response([
+            'success' => false,
+            'errors' => [['code' => 10001, 'message' => 'invalid token']],
+        ], 401),
+    ]);
+
+    (new SyncCloudflareSuppressions)->handle(app(CloudflareApiClient::class));
+
+    expect($suppression->fresh())->not->toBeNull();
+});
+
 it('continues syncing other sources when one token fails', function () {
     cloudflareSuppressionSource('cf-bad', 'acc-bad');
     cloudflareSuppressionSource('cf-good', 'acc-good');
