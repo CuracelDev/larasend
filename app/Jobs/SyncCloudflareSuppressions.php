@@ -4,10 +4,11 @@ namespace App\Jobs;
 
 use App\Enums\SourceProvider;
 use App\Models\Source;
-use App\Models\Suppression;
 use App\Services\CloudflareApiClient;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
+use Illuminate\Queue\Attributes\UniqueFor;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
 use Throwable;
@@ -17,11 +18,12 @@ use Throwable;
  * account-level list instead. This pull-only sync mirrors that list into
  * Larasend so suppressed recipients are blocked before a send is attempted.
  */
-class SyncCloudflareSuppressions implements ShouldQueue
+#[UniqueFor(3900)]
+class SyncCloudflareSuppressions implements ShouldBeUnique, ShouldQueue
 {
     use Queueable;
 
-    public int $timeout = 120;
+    public int $timeout = 75;
 
     public function handle(CloudflareApiClient $cloudflare): void
     {
@@ -48,7 +50,7 @@ class SyncCloudflareSuppressions implements ShouldQueue
             return;
         }
 
-        $suppressions = $cloudflare->listSuppressions($source);
+        $suppressions = $cloudflare->listStableSuppressions($source);
         $syncedEmails = [];
 
         foreach ($suppressions as $suppression) {
@@ -58,22 +60,26 @@ class SyncCloudflareSuppressions implements ShouldQueue
                 continue;
             }
 
-            $syncedEmails[] = $email;
+            $values = [
+                'workspace_id' => $project->workspace_id,
+                'source_id' => $source->id,
+                'email_id' => null,
+                'reason' => $this->mapReason($suppression['reason']),
+                'event_type' => 'provider_sync',
+                'expires_at' => $suppression['expires_at'] ? Carbon::parse($suppression['expires_at']) : null,
+            ];
 
-            Suppression::query()->updateOrCreate(
-                [
-                    'project_id' => $project->id,
-                    'email' => $email,
-                ],
-                [
-                    'workspace_id' => $project->workspace_id,
-                    'source_id' => $source->id,
-                    'email_id' => null,
-                    'reason' => $this->mapReason($suppression['reason']),
-                    'event_type' => 'provider_sync',
-                    'expires_at' => $suppression['expires_at'] ? Carbon::parse($suppression['expires_at']) : null,
-                ],
+            $existing = $project->suppressions()->firstOrCreate(
+                ['email' => $email],
+                $values,
             );
+
+            if ($existing->source_id !== $source->id || $existing->event_type !== 'provider_sync') {
+                continue;
+            }
+
+            $existing->update($values);
+            $syncedEmails[] = $email;
         }
 
         $providerSyncSuppressions = $project->suppressions()

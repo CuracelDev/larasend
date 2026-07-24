@@ -292,7 +292,7 @@ class DashboardActionController extends Controller
             $project,
             $apiKey->name,
             $apiKey->source,
-            $apiKey->scopes ?: ['send', 'read:activity'],
+            $apiKey->scopes,
             $apiKey->expires_at,
         );
 

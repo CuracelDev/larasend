@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Enums\SourceProvider;
+use App\Exceptions\SuppressionProviderUnavailableException;
 use App\Exceptions\SuppressionRemovalException;
 use App\Models\Suppression;
 use Illuminate\Support\Str;
@@ -29,8 +30,10 @@ class SuppressionRemovalService
             try {
                 $this->ses->deleteSuppressedDestination($source, $suppression->email);
             } catch (Throwable $exception) {
-                throw new SuppressionRemovalException(
-                    'Amazon SES could not remove this address. The local blocker was preserved. '.$exception->getMessage(),
+                report($exception);
+
+                throw new SuppressionProviderUnavailableException(
+                    'Amazon SES could not remove this address right now. The local blocker was preserved. Try again later.',
                     previous: $exception,
                 );
             }
@@ -41,10 +44,12 @@ class SuppressionRemovalService
         }
 
         try {
-            $upstreamSuppressions = $this->cloudflare->listSuppressions($source);
+            $upstreamSuppressions = $this->cloudflare->listStableSuppressions($source);
         } catch (Throwable $exception) {
-            throw new SuppressionRemovalException(
-                'Cloudflare could not confirm whether this address is still suppressed. The local blocker was preserved. '.$exception->getMessage(),
+            report($exception);
+
+            throw new SuppressionProviderUnavailableException(
+                'Cloudflare could not verify this address right now. The local blocker was preserved. Try again later.',
                 previous: $exception,
             );
         }

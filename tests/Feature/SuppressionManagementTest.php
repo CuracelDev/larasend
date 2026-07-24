@@ -7,6 +7,9 @@ use App\Models\Suppression;
 use App\Models\User;
 use App\Models\Workspace;
 use Illuminate\Http\Client\Request;
+use Illuminate\Http\Client\RequestException;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Http;
 
 /**
@@ -55,6 +58,8 @@ function managedSuppression(Project $project, ?Source $source, string $email = '
 }
 
 it('allows an owner to remove an SES suppression from the provider and project', function () {
+    $this->travelTo(Carbon::parse('2030-01-02 03:04:05 UTC'));
+
     Http::preventStrayRequests();
     Http::fake([
         'https://email.us-east-1.amazonaws.com/v2/email/suppression/addresses/*' => Http::response(status: 204),
@@ -76,9 +81,18 @@ it('allows an owner to remove an SES suppression from the provider and project',
 
     $this->assertModelMissing($suppression);
 
-    Http::assertSent(fn (Request $request): bool => $request->method() === 'DELETE'
-        && str_ends_with($request->url(), '/v2/email/suppression/addresses/Owner.Blocked%40example.com')
-        && str_starts_with((string) $request->header('Authorization')[0], 'AWS4-HMAC-SHA256 '));
+    Http::assertSent(function (Request $request): bool {
+        $expectedAuthorization = 'AWS4-HMAC-SHA256 Credential=test-access-key/20300102/us-east-1/ses/aws4_request, '
+            .'SignedHeaders=content-type;host;x-amz-date, '
+            .'Signature=0649cdec45840e86b0bc4dd45e22f29959c0c612c2480022955966414a0ea0d7';
+
+        return $request->method() === 'DELETE'
+            && str_ends_with($request->url(), '/v2/email/suppression/addresses/Owner.Blocked%40example.com')
+            && $request->header('X-Amz-Date')[0] === '20300102T030405Z'
+            && $request->header('Authorization')[0] === $expectedAuthorization;
+    });
+
+    $this->travelBack();
 });
 
 it('allows a member to remove an SES suppression when the provider already removed it', function () {
@@ -179,6 +193,19 @@ it('refuses local Cloudflare removal while the address remains upstream', functi
                     ],
                 ],
             ])
+            ->push(['success' => true, 'result' => []])
+            ->push([
+                'success' => true,
+                'result' => [
+                    [
+                        'id' => 'suppression-1',
+                        'email' => 'BLOCKED@example.com',
+                        'reason' => 'hard_bounce',
+                        'created_at' => now()->toIso8601String(),
+                        'expires_at' => null,
+                    ],
+                ],
+            ])
             ->push(['success' => true, 'result' => []]),
     ]);
 
@@ -201,6 +228,19 @@ it('removes the local Cloudflare blocker after a complete list confirms it is ab
 
     Http::fake([
         'https://api.cloudflare.com/client/v4/accounts/account-cloudflare-absent/email/sending/suppression*' => Http::sequence()
+            ->push([
+                'success' => true,
+                'result' => [
+                    [
+                        'id' => 'suppression-2',
+                        'email' => 'someone-else@example.com',
+                        'reason' => 'hard_bounce',
+                        'created_at' => now()->toIso8601String(),
+                        'expires_at' => null,
+                    ],
+                ],
+            ])
+            ->push(['success' => true, 'result' => []])
             ->push([
                 'success' => true,
                 'result' => [
@@ -241,6 +281,100 @@ it('requires the manage suppressions scope for the API delete route', function (
         ->assertNoContent();
 
     $this->assertModelMissing($suppression);
+});
+
+it('returns conflict when Cloudflare still owns the suppression upstream', function () {
+    Http::preventStrayRequests();
+    [, , $project, $source] = suppressionManagementFixture('api-cloudflare-conflict', 'cloudflare');
+    $suppression = managedSuppression($project, $source);
+    $issued = ApiKey::issue($project, 'Manage key', $source, ['manage:suppressions']);
+    $upstream = [
+        'success' => true,
+        'result' => [[
+            'id' => 'suppression-conflict',
+            'email' => 'blocked@example.com',
+            'reason' => 'hard_bounce',
+            'created_at' => now()->toIso8601String(),
+            'expires_at' => null,
+        ]],
+    ];
+
+    Http::fake([
+        'https://api.cloudflare.com/client/v4/accounts/account-api-cloudflare-conflict/email/sending/suppression*' => Http::sequence()
+            ->push($upstream)
+            ->push(['success' => true, 'result' => []])
+            ->push($upstream)
+            ->push(['success' => true, 'result' => []]),
+    ]);
+
+    $this->withToken($issued['plain_text'])
+        ->deleteJson("/api/suppressions/{$suppression->id}")
+        ->assertConflict()
+        ->assertJsonPath(
+            'message',
+            'Cloudflare still lists this address upstream and does not provide a suppression-removal API. Remove it in Cloudflare first, then retry.',
+        );
+
+    $this->assertModelExists($suppression);
+});
+
+it('returns service unavailable without exposing provider errors', function () {
+    Http::preventStrayRequests();
+    [, , $project, $source] = suppressionManagementFixture('api-provider-failure');
+    $suppression = managedSuppression($project, $source);
+    $issued = ApiKey::issue($project, 'Manage key', $source, ['manage:suppressions']);
+
+    Exceptions::fake();
+    Http::fake([
+        'https://email.us-east-1.amazonaws.com/v2/email/suppression/addresses/*' => Http::response([
+            'message' => 'super-secret-upstream-detail',
+        ], 403),
+    ]);
+
+    $this->withToken($issued['plain_text'])
+        ->deleteJson("/api/suppressions/{$suppression->id}")
+        ->assertServiceUnavailable()
+        ->assertJsonPath(
+            'message',
+            'Amazon SES could not remove this address right now. The local blocker was preserved. Try again later.',
+        )
+        ->assertJsonMissing(['message' => 'super-secret-upstream-detail']);
+
+    Exceptions::assertReported(RequestException::class);
+    $this->assertModelExists($suppression);
+});
+
+it('preserves a Cloudflare suppression when consecutive complete snapshots never stabilize', function () {
+    Http::preventStrayRequests();
+    [, , $project, $source] = suppressionManagementFixture('api-cloudflare-unstable', 'cloudflare');
+    $suppression = managedSuppression($project, $source);
+    $issued = ApiKey::issue($project, 'Manage key', $source, ['manage:suppressions']);
+    $snapshot = fn (string $id): array => [
+        'success' => true,
+        'result' => [[
+            'id' => $id,
+            'email' => "{$id}@example.com",
+            'reason' => 'hard_bounce',
+            'created_at' => now()->toIso8601String(),
+            'expires_at' => null,
+        ]],
+    ];
+
+    Http::fake([
+        'https://api.cloudflare.com/client/v4/accounts/account-api-cloudflare-unstable/email/sending/suppression*' => Http::sequence()
+            ->push($snapshot('first'))
+            ->push(['success' => true, 'result' => []])
+            ->push($snapshot('second'))
+            ->push(['success' => true, 'result' => []])
+            ->push($snapshot('third'))
+            ->push(['success' => true, 'result' => []]),
+    ]);
+
+    $this->withToken($issued['plain_text'])
+        ->deleteJson("/api/suppressions/{$suppression->id}")
+        ->assertServiceUnavailable();
+
+    $this->assertModelExists($suppression);
 });
 
 it('keeps legacy null-scoped API keys authorized while preserving project isolation', function () {

@@ -34,9 +34,10 @@ class ApiKey extends Model
     }
 
     /**
+     * @param  array<int, string>|null  $scopes
      * @return array{plain_text: string, api_key: self}
      */
-    public static function issue(Project $project, string $name, ?Source $source = null, array $scopes = ['send', 'read:activity'], ?\DateTimeInterface $expiresAt = null): array
+    public static function issue(Project $project, string $name, ?Source $source = null, ?array $scopes = ['send', 'read:activity'], ?\DateTimeInterface $expiresAt = null): array
     {
         $plainText = 'ls_'.Str::random(48);
 
@@ -48,7 +49,7 @@ class ApiKey extends Model
                 'name' => $name,
                 'prefix' => Str::substr($plainText, 0, 12),
                 'key_hash' => hash('sha256', $plainText),
-                'scopes' => array_values(array_unique($scopes)),
+                'scopes' => $scopes === null ? null : array_values(array_unique($scopes)),
                 'expires_at' => $expiresAt,
             ]),
         ];

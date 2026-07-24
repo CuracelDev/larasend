@@ -7,6 +7,9 @@ use App\Models\Suppression;
 use App\Models\User;
 use App\Models\Workspace;
 use App\Services\CloudflareApiClient;
+use Illuminate\Console\Scheduling\Schedule;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
+use Illuminate\Queue\Attributes\UniqueFor;
 use Illuminate\Support\Facades\Http;
 
 function cloudflareSuppressionSource(string $slug, string $accountId): array
@@ -41,6 +44,14 @@ it('pulls cloudflare suppressions into the project with mapped reasons', functio
                     ['id' => 'sup-2', 'email' => 'complainer@example.com', 'reason' => 'spam_complaint', 'created_at' => now()->toIso8601String(), 'expires_at' => now()->addMonth()->toIso8601String()],
                 ],
             ])
+            ->push(['success' => true, 'result' => []])
+            ->push([
+                'success' => true,
+                'result' => [
+                    ['id' => 'sup-1', 'email' => 'Bounced@Example.com', 'reason' => 'hard_bounce', 'created_at' => now()->toIso8601String(), 'expires_at' => null],
+                    ['id' => 'sup-2', 'email' => 'complainer@example.com', 'reason' => 'spam_complaint', 'created_at' => now()->toIso8601String(), 'expires_at' => now()->addMonth()->toIso8601String()],
+                ],
+            ])
             ->push(['success' => true, 'result' => []]),
     ]);
 
@@ -65,6 +76,20 @@ it('is idempotent across repeated sync runs', function () {
 
     Http::fake([
         'https://api.cloudflare.com/client/v4/accounts/acc-idem/email/sending/suppression*' => Http::sequence()
+            ->push([
+                'success' => true,
+                'result' => [
+                    ['id' => 'sup-1', 'email' => 'repeat@example.com', 'reason' => 'hard_bounce', 'created_at' => now()->toIso8601String(), 'expires_at' => null],
+                ],
+            ])
+            ->push(['success' => true, 'result' => []])
+            ->push([
+                'success' => true,
+                'result' => [
+                    ['id' => 'sup-1', 'email' => 'repeat@example.com', 'reason' => 'hard_bounce', 'created_at' => now()->toIso8601String(), 'expires_at' => null],
+                ],
+            ])
+            ->push(['success' => true, 'result' => []])
             ->push([
                 'success' => true,
                 'result' => [
@@ -208,10 +233,121 @@ it('continues syncing other sources when one token fails', function () {
                     ['id' => 'sup-9', 'email' => 'survivor@example.com', 'reason' => 'hard_bounce', 'created_at' => now()->toIso8601String(), 'expires_at' => null],
                 ],
             ])
+            ->push(['success' => true, 'result' => []])
+            ->push([
+                'success' => true,
+                'result' => [
+                    ['id' => 'sup-9', 'email' => 'survivor@example.com', 'reason' => 'hard_bounce', 'created_at' => now()->toIso8601String(), 'expires_at' => null],
+                ],
+            ])
             ->push(['success' => true, 'result' => []]),
     ]);
 
     (new SyncCloudflareSuppressions)->handle(app(CloudflareApiClient::class));
 
     expect(Suppression::query()->where('email', 'survivor@example.com')->exists())->toBeTrue();
+});
+
+it('does not prune local rows when complete Cloudflare snapshots keep changing', function () {
+    [$project, $source] = cloudflareSuppressionSource('cf-unstable', 'acc-unstable');
+    $suppression = Suppression::create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email' => 'must-stay@example.com',
+        'reason' => 'hard_bounce',
+        'event_type' => 'provider_sync',
+    ]);
+    $snapshot = fn (string $id): array => [
+        'success' => true,
+        'result' => [[
+            'id' => $id,
+            'email' => "{$id}@example.com",
+            'reason' => 'hard_bounce',
+            'created_at' => now()->toIso8601String(),
+            'expires_at' => null,
+        ]],
+    ];
+
+    Http::fake([
+        'https://api.cloudflare.com/client/v4/accounts/acc-unstable/email/sending/suppression*' => Http::sequence()
+            ->push($snapshot('first'))
+            ->push(['success' => true, 'result' => []])
+            ->push($snapshot('second'))
+            ->push(['success' => true, 'result' => []])
+            ->push($snapshot('third'))
+            ->push(['success' => true, 'result' => []]),
+    ]);
+
+    (new SyncCloudflareSuppressions)->handle(app(CloudflareApiClient::class));
+
+    $this->assertModelExists($suppression);
+});
+
+it('never takes ownership of a colliding suppression or prunes it later', function () {
+    [$project, $source] = cloudflareSuppressionSource('cf-collision', 'acc-collision');
+    $sesSource = Source::create([
+        'project_id' => $project->id,
+        'name' => 'Historical SES source',
+        'environment' => 'staging',
+        'provider' => 'ses',
+        'webhook_token' => 'token-'.str()->random(8),
+    ]);
+    $suppression = Suppression::create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => $sesSource->id,
+        'email' => 'collision@example.com',
+        'reason' => 'complaint',
+        'event_type' => 'complaint',
+    ]);
+    $present = [
+        'success' => true,
+        'result' => [[
+            'id' => 'cf-collision',
+            'email' => 'collision@example.com',
+            'reason' => 'hard_bounce',
+            'created_at' => now()->toIso8601String(),
+            'expires_at' => null,
+        ]],
+    ];
+    $empty = ['success' => true, 'result' => []];
+
+    Http::fake([
+        'https://api.cloudflare.com/client/v4/accounts/acc-collision/email/sending/suppression*' => Http::sequence()
+            ->push($present)
+            ->push($empty)
+            ->push($present)
+            ->push($empty)
+            ->push($empty)
+            ->push($empty),
+    ]);
+
+    (new SyncCloudflareSuppressions)->handle(app(CloudflareApiClient::class));
+    (new SyncCloudflareSuppressions)->handle(app(CloudflareApiClient::class));
+
+    expect($suppression->fresh())
+        ->not->toBeNull()
+        ->source_id->toBe($sesSource->id)
+        ->event_type->toBe('complaint')
+        ->reason->toBe('complaint');
+});
+
+it('has bounded unique execution and a non-overlapping schedule', function () {
+    $job = new SyncCloudflareSuppressions;
+    $event = collect(app(Schedule::class)->events())
+        ->first(fn ($event): bool => $event->description === SyncCloudflareSuppressions::class);
+    $uniqueFor = (new ReflectionClass($job))
+        ->getAttributes(UniqueFor::class)[0]
+        ->newInstance()
+        ->uniqueFor;
+    $retryAfterValues = collect(config('queue.connections'))
+        ->pluck('retry_after')
+        ->filter(fn ($retryAfter): bool => is_int($retryAfter));
+
+    expect($job)->toBeInstanceOf(ShouldBeUnique::class)
+        ->and($retryAfterValues->every(fn (int $retryAfter): bool => $job->timeout < $retryAfter))->toBeTrue()
+        ->and($uniqueFor)->toBeGreaterThan(3600 + $job->timeout)
+        ->and($event)->not->toBeNull()
+        ->and($event->withoutOverlapping)->toBeTrue();
 });

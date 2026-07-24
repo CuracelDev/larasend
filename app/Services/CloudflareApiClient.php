@@ -6,6 +6,7 @@ use App\Models\Source;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
 use RuntimeException;
 
 class CloudflareApiClient
@@ -67,6 +68,47 @@ class CloudflareApiClient
         } while ($results !== []);
 
         return $suppressions;
+    }
+
+    /**
+     * A bounded, stable account-level snapshot safe for destructive decisions.
+     *
+     * @return array<int, array{id: string, email: string, reason: string, created_at: string|null, expires_at: string|null}>
+     */
+    public function listStableSuppressions(Source $source): array
+    {
+        $previousSnapshot = null;
+
+        for ($attempt = 0; $attempt < 3; $attempt++) {
+            $snapshot = $this->normalizeSuppressionSnapshot($this->listSuppressions($source));
+
+            if ($previousSnapshot !== null && $snapshot === $previousSnapshot) {
+                return $snapshot;
+            }
+
+            $previousSnapshot = $snapshot;
+        }
+
+        throw new RuntimeException('Cloudflare suppression data changed during pagination. No destructive changes were made.');
+    }
+
+    /**
+     * @param  array<int, array{id: string, email: string, reason: string, created_at: string|null, expires_at: string|null}>  $suppressions
+     * @return array<int, array{id: string, email: string, reason: string, created_at: string|null, expires_at: string|null}>
+     */
+    private function normalizeSuppressionSnapshot(array $suppressions): array
+    {
+        return collect($suppressions)
+            ->map(fn (array $suppression): array => [
+                'id' => trim($suppression['id']),
+                'email' => Str::lower(trim($suppression['email'])),
+                'reason' => trim($suppression['reason']),
+                'created_at' => $suppression['created_at'],
+                'expires_at' => $suppression['expires_at'],
+            ])
+            ->sortBy(fn (array $suppression): string => json_encode($suppression, JSON_THROW_ON_ERROR))
+            ->values()
+            ->all();
     }
 
     /**

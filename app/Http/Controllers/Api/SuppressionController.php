@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exceptions\SuppressionProviderUnavailableException;
 use App\Exceptions\SuppressionRemovalException;
 use App\Http\Controllers\Controller;
 use App\Models\Project;
@@ -25,8 +26,10 @@ class SuppressionController extends Controller
 
         try {
             $removalService->remove($suppression);
+        } catch (SuppressionProviderUnavailableException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 503);
         } catch (SuppressionRemovalException $exception) {
-            return response()->json(['message' => $exception->getMessage()], 422);
+            return response()->json(['message' => $exception->getMessage()], 409);
         }
 
         return response()->noContent();

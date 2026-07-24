@@ -155,8 +155,9 @@ class SesV2Client
     {
         $credentials = $this->awsCredentials($source);
         $host = parse_url($url, PHP_URL_HOST);
-        $amzDate = gmdate('Ymd\THis\Z');
-        $date = gmdate('Ymd');
+        $timestamp = now('UTC');
+        $amzDate = $timestamp->format('Ymd\THis\Z');
+        $date = $timestamp->format('Ymd');
         $payloadHash = hash('sha256', $payload);
         $sessionToken = $credentials['session_token'] ?? null;
         $sessionHeader = filled($sessionToken) ? "x-amz-security-token:{$sessionToken}\n" : '';
@@ -166,7 +167,7 @@ class SesV2Client
             : 'content-type;host;x-amz-date';
         $canonicalRequest = implode("\n", [
             $method,
-            parse_url($url, PHP_URL_PATH),
+            $this->canonicalUri($url),
             '',
             $canonicalHeaders,
             $signedHeaders,
@@ -196,6 +197,13 @@ class SesV2Client
         }
 
         return $headers;
+    }
+
+    private function canonicalUri(string $url): string
+    {
+        $path = parse_url($url, PHP_URL_PATH) ?: '/';
+
+        return implode('/', array_map(rawurlencode(...), explode('/', $path)));
     }
 
     /**

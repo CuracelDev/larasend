@@ -402,6 +402,27 @@ it('deletes project scoped api keys from the dashboard', function () {
     expect($apiKey->fresh())->toBeNull();
 });
 
+it('preserves exact api key scopes when rotating keys', function (?array $scopes, bool $allowsSuppressionManagement) {
+    $user = User::factory()->create();
+    $project = app(ProjectContext::class)->projectFor($user);
+    $apiKey = ApiKey::issue($project, 'Production key')['api_key'];
+    $apiKey->forceFill(['scopes' => $scopes])->save();
+
+    $this->actingAs($user)
+        ->post("/api-keys/{$apiKey->id}/rotate")
+        ->assertRedirect('/api-keys');
+
+    $rotated = $project->apiKeys()->whereKeyNot($apiKey->id)->firstOrFail();
+
+    expect($apiKey->fresh())->toBeNull()
+        ->and($rotated->scopes)->toBe($scopes)
+        ->and($rotated->allows('manage:suppressions'))->toBe($allowsSuppressionManagement);
+})->with([
+    'legacy full access' => [null, true],
+    'explicit deny all' => [[], false],
+    'explicit scopes' => [['read:activity', 'manage:suppressions'], true],
+]);
+
 it('syncs ses source quota from aws', function () {
     $user = User::factory()->create();
     $project = app(ProjectContext::class)->projectFor($user);
