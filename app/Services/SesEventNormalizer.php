@@ -8,7 +8,6 @@ use App\Models\EmailEvent;
 use App\Models\Source;
 use App\Models\Suppression;
 use Carbon\CarbonImmutable;
-use Illuminate\Support\Str;
 
 class SesEventNormalizer
 {
@@ -112,7 +111,7 @@ class SesEventNormalizer
 
         $attributes = (new Suppression)->forceFill([
             'project_id' => $email->project_id,
-            'email' => Str::lower(trim($recipient)),
+            'email' => Suppression::normalizeEmail($recipient),
             'workspace_id' => $email->workspace_id,
             'source_id' => $email->source_id,
             'email_id' => $email->id,

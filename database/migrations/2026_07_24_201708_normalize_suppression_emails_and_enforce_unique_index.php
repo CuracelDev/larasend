@@ -22,9 +22,10 @@ return new class extends Migration
             $this->consolidateCaseVariants($migrationStartedAt);
 
             DB::table('suppressions')->update([
-                'email' => DB::raw('LOWER(TRIM(email))'),
+                'email' => DB::raw($this->normalizedEmailExpression()),
             ]);
         });
+
         $this->addNormalizedUniqueIndex();
     }
 
@@ -55,18 +56,24 @@ return new class extends Migration
 
     private function consolidateCaseVariants(CarbonImmutable $migrationStartedAt): void
     {
+        $normalizedEmailExpression = $this->normalizedEmailExpression();
         $duplicateGroups = DB::table('suppressions')
             ->select('project_id')
-            ->selectRaw('LOWER(TRIM(email)) AS normalized_email')
+            ->selectRaw("{$normalizedEmailExpression} AS normalized_email")
             ->groupBy('project_id')
-            ->groupByRaw('LOWER(TRIM(email))')
+            ->groupByRaw($normalizedEmailExpression)
             ->havingRaw('COUNT(*) > 1')
             ->get();
 
         foreach ($duplicateGroups as $group) {
+            // PostgreSQL/MySQL lock each affected row through consolidation.
+            // SQLite omits FOR UPDATE and instead serializes writers at the
+            // database level, aborting a conflicting migration for retry.
             $suppressions = DB::table('suppressions')
                 ->where('project_id', $group->project_id)
-                ->whereRaw('LOWER(TRIM(email)) = ?', [$group->normalized_email])
+                ->whereRaw("{$normalizedEmailExpression} = ?", [$group->normalized_email])
+                ->orderBy('id')
+                ->lockForUpdate()
                 ->get();
 
             $keeper = $suppressions
@@ -95,7 +102,7 @@ return new class extends Migration
     }
 
     /**
-     * Prefer active blockers, complaints, and rows carrying local ownership.
+     * Prefer active blockers and local ownership before blocker reason.
      * Remaining ties resolve by permanence, recency, then id.
      *
      * @return array<int, int>
@@ -104,10 +111,10 @@ return new class extends Migration
     {
         return [
             (int) $this->isActive($suppression, $migrationStartedAt),
-            (int) ($suppression->reason === 'complaint' || $suppression->event_type === 'complaint'),
             (int) ($suppression->event_type !== 'provider_sync'),
             (int) ($suppression->email_id !== null),
             (int) ($suppression->source_id !== null),
+            (int) ($suppression->reason === 'complaint' || $suppression->event_type === 'complaint'),
             (int) ($suppression->expires_at === null),
             $this->timestamp($suppression->updated_at),
             (int) $suppression->id,
@@ -145,11 +152,12 @@ return new class extends Migration
     private function addNormalizedUniqueIndex(): void
     {
         $driver = DB::connection()->getDriverName();
+        $normalizedEmailExpression = $this->normalizedEmailExpression();
 
         if (in_array($driver, ['pgsql', 'sqlite'], true)) {
             DB::statement(
                 'CREATE UNIQUE INDEX '.self::NORMALIZED_UNIQUE_INDEX
-                .' ON suppressions (project_id, LOWER(TRIM(email)))',
+                ." ON suppressions (project_id, {$normalizedEmailExpression})",
             );
 
             return;
@@ -158,7 +166,7 @@ return new class extends Migration
         if (in_array($driver, ['mysql', 'mariadb'], true)) {
             Schema::table('suppressions', function (Blueprint $table): void {
                 $table->string('normalized_email')
-                    ->storedAs('LOWER(TRIM(email))');
+                    ->storedAs($this->normalizedEmailExpression());
                 $table->unique(['project_id', 'normalized_email'], self::NORMALIZED_UNIQUE_INDEX);
             });
 
@@ -167,7 +175,7 @@ return new class extends Migration
 
         if ($driver === 'sqlsrv') {
             Schema::table('suppressions', function (Blueprint $table): void {
-                $table->computed('normalized_email', 'LOWER(TRIM([email]))')
+                $table->computed('normalized_email', $this->normalizedEmailExpression())
                     ->persisted();
                 $table->unique(['project_id', 'normalized_email'], self::NORMALIZED_UNIQUE_INDEX);
             });
@@ -176,5 +184,25 @@ return new class extends Migration
         }
 
         throw new RuntimeException("Unsupported database driver [{$driver}].");
+    }
+
+    /**
+     * Fold only ASCII A-Z and trim only ASCII spaces so PHP and every
+     * supported database apply the same byte-for-byte normalization.
+     */
+    private function normalizedEmailExpression(): string
+    {
+        $expression = 'TRIM(email)';
+
+        foreach (range('A', 'Z') as $uppercase) {
+            $expression = sprintf(
+                "REPLACE(%s, '%s', '%s')",
+                $expression,
+                $uppercase,
+                strtolower($uppercase),
+            );
+        }
+
+        return $expression;
     }
 };

@@ -3,10 +3,10 @@
 namespace App\Services;
 
 use App\Models\Source;
+use App\Models\Suppression;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Str;
 use RuntimeException;
 
 class CloudflareApiClient
@@ -125,7 +125,7 @@ class CloudflareApiClient
         return collect($suppressions)
             ->map(fn (array $suppression): array => [
                 'id' => trim($suppression['id']),
-                'email' => Str::lower(trim($suppression['email'])),
+                'email' => Suppression::normalizeEmail($suppression['email']),
                 'reason' => trim($suppression['reason']),
                 'created_at' => $suppression['created_at'],
                 'expires_at' => $suppression['expires_at'],

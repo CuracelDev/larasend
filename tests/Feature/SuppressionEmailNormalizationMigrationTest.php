@@ -1,24 +1,32 @@
 <?php
 
+use App\Jobs\SyncCloudflareSourceSuppressions;
 use App\Models\Email;
 use App\Models\Project;
 use App\Models\Source;
 use App\Models\Suppression;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Services\CloudflareApiClient;
 use App\Services\SesEventNormalizer;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 
-function suppressionEmailNormalizationMigration(): Migration
+function suppressionEmailNormalizationMigrationFile(): string
 {
     $migrationFiles = glob(database_path('migrations/*_normalize_suppression_emails_and_enforce_unique_index.php'));
 
     expect($migrationFiles)->toHaveCount(1);
 
-    return require $migrationFiles[0];
+    return $migrationFiles[0];
+}
+
+function suppressionEmailNormalizationMigration(): Migration
+{
+    return require suppressionEmailNormalizationMigrationFile();
 }
 
 it('safely consolidates historical case variants and enforces normalized uniqueness', function () {
@@ -201,4 +209,189 @@ it('safely consolidates historical case variants and enforces normalized uniquen
         'created_at' => $now,
         'updated_at' => $now,
     ]))->toThrow(QueryException::class);
+});
+
+it('keeps an active local blocker over a Cloudflare complaint and protects it from later pruning', function () {
+    $migration = suppressionEmailNormalizationMigration();
+    $migration->down();
+
+    $now = Carbon::parse('2026-07-24 12:00:00');
+    $this->travelTo($now);
+
+    $user = User::factory()->create();
+    $workspace = Workspace::create([
+        'owner_id' => $user->id,
+        'name' => 'Inverse Suppression Collision',
+        'slug' => 'inverse-suppression-collision',
+    ]);
+    $project = Project::create([
+        'workspace_id' => $workspace->id,
+        'name' => 'Inverse Suppression Collision',
+        'slug' => 'inverse-suppression-collision',
+    ]);
+    $sesSource = Source::create([
+        'project_id' => $project->id,
+        'name' => 'SES',
+        'environment' => 'prod',
+        'provider' => 'ses',
+        'webhook_token' => 'ses-inverse-collision',
+    ]);
+    $cloudflareSource = Source::create([
+        'project_id' => $project->id,
+        'name' => 'Cloudflare',
+        'environment' => 'staging',
+        'provider' => 'cloudflare',
+        'cloudflare_api_token' => 'token',
+        'cloudflare_account_id' => 'inverse-collision-account',
+        'webhook_token' => 'cloudflare-inverse-collision',
+    ]);
+
+    $localId = DB::table('suppressions')->insertGetId([
+        'workspace_id' => $workspace->id,
+        'project_id' => $project->id,
+        'source_id' => $sesSource->id,
+        'email_id' => null,
+        'email' => ' Independent@Example.com ',
+        'reason' => 'hard_bounce',
+        'event_type' => 'bounce',
+        'expires_at' => $now->copy()->addWeek(),
+        'created_at' => $now->copy()->subDays(2),
+        'updated_at' => $now->copy()->subDay(),
+    ]);
+    DB::table('suppressions')->insert([
+        'workspace_id' => $workspace->id,
+        'project_id' => $project->id,
+        'source_id' => $cloudflareSource->id,
+        'email_id' => null,
+        'email' => 'independent@example.com',
+        'reason' => 'complaint',
+        'event_type' => 'provider_sync',
+        'expires_at' => null,
+        'created_at' => $now->copy()->subDay(),
+        'updated_at' => $now,
+    ]);
+
+    $migration->up();
+
+    $survivor = Suppression::query()
+        ->where('project_id', $project->id)
+        ->where('email', 'independent@example.com')
+        ->firstOrFail();
+
+    expect($survivor)
+        ->id->toBe($localId)
+        ->source_id->toBe($sesSource->id)
+        ->reason->toBe('hard_bounce')
+        ->event_type->toBe('bounce')
+        ->expires_at->toBeNull();
+
+    Http::preventStrayRequests();
+    Http::fake([
+        'https://api.cloudflare.com/client/v4/accounts/inverse-collision-account/email/sending/suppression*' => Http::sequence()
+            ->push(['success' => true, 'result' => []])
+            ->push(['success' => true, 'result' => []]),
+    ]);
+
+    (new SyncCloudflareSourceSuppressions($cloudflareSource->id))
+        ->handle(app(CloudflareApiClient::class));
+
+    expect($survivor->fresh())
+        ->id->toBe($localId)
+        ->source_id->toBe($sesSource->id)
+        ->event_type->toBe('bounce');
+});
+
+it('uses the same ASCII normalization contract in the migration and model', function () {
+    $migration = suppressionEmailNormalizationMigration();
+    $migration->down();
+
+    $user = User::factory()->create();
+    $workspace = Workspace::create([
+        'owner_id' => $user->id,
+        'name' => 'Suppression Canonicalization',
+        'slug' => 'suppression-canonicalization',
+    ]);
+    $project = Project::create([
+        'workspace_id' => $workspace->id,
+        'name' => 'Suppression Canonicalization',
+        'slug' => 'suppression-canonicalization',
+    ]);
+    $source = Source::create([
+        'project_id' => $project->id,
+        'name' => 'SES',
+        'environment' => 'prod',
+        'provider' => 'ses',
+        'webhook_token' => 'ses-suppression-canonicalization',
+    ]);
+
+    DB::table('suppressions')->insert([
+        'workspace_id' => $workspace->id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email_id' => null,
+        'email' => "\tTabs@Example.com\t",
+        'reason' => 'hard_bounce',
+        'event_type' => 'bounce',
+        'expires_at' => null,
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+    DB::table('suppressions')->insert([
+        'workspace_id' => $workspace->id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email_id' => null,
+        'email' => "\tÄBC@Unicode.Example\t",
+        'reason' => 'complaint',
+        'event_type' => 'complaint',
+        'expires_at' => null,
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    $migration->up();
+
+    expect(DB::table('suppressions')->where('reason', 'hard_bounce')->value('email'))
+        ->toBe("\ttabs@example.com\t")
+        ->and(DB::table('suppressions')->where('reason', 'complaint')->value('email'))
+        ->toBe("\tÄbc@unicode.example\t");
+
+    $model = new Suppression;
+    $model->email = "\tTABS@Example.com\t";
+    $unicodeModel = new Suppression;
+    $unicodeModel->email = "\tÄBC@Unicode.Example\t";
+
+    expect($model->getAttributes()['email'])->toBe("\ttabs@example.com\t")
+        ->and($unicodeModel->getAttributes()['email'])->toBe("\tÄbc@unicode.example\t")
+        ->and(fn () => Suppression::create([
+            'workspace_id' => $workspace->id,
+            'project_id' => $project->id,
+            'source_id' => $source->id,
+            'email' => "\tTABS@Example.com\t",
+            'reason' => 'hard_bounce',
+            'event_type' => 'bounce',
+        ]))->toThrow(QueryException::class);
+
+    DB::table('suppressions')->insert([
+        'workspace_id' => $workspace->id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email_id' => null,
+        'email' => 'tabs@example.com',
+        'reason' => 'hard_bounce',
+        'event_type' => 'bounce',
+        'expires_at' => null,
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    expect(Suppression::query()->where('project_id', $project->id)->count())->toBe(3);
+});
+
+it('locks affected duplicate rows before deleting a loser', function () {
+    $migrationSource = file_get_contents(suppressionEmailNormalizationMigrationFile());
+
+    expect($migrationSource)
+        ->toContain('->lockForUpdate()')
+        ->and($migrationSource)->toMatch('/lockForUpdate\\(\\).*whereIn\\([^;]+delete\\(\\)/s');
 });

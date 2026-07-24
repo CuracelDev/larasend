@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Enums\SourceProvider;
 use App\Models\Source;
+use App\Models\Suppression;
 use App\Services\CloudflareApiClient;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -11,7 +12,6 @@ use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Queue\Attributes\UniqueFor;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Str;
 use RuntimeException;
 use Throwable;
 
@@ -57,7 +57,7 @@ class SyncCloudflareSourceSuppressions implements ShouldBeUnique, ShouldQueue
 
         foreach ($suppressions as $suppression) {
             $this->ensureWithinWorkBudget($deadline);
-            $email = Str::lower(trim($suppression['email']));
+            $email = Suppression::normalizeEmail($suppression['email']);
 
             if ($email === '') {
                 continue;

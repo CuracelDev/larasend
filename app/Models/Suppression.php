@@ -7,11 +7,14 @@ use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Support\Str;
 
 class Suppression extends Model
 {
     use HasFactory;
+
+    private const ASCII_LOWERCASE = 'abcdefghijklmnopqrstuvwxyz';
+
+    private const ASCII_UPPERCASE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
     protected $fillable = [
         'workspace_id',
@@ -34,7 +37,16 @@ class Suppression extends Model
     protected function email(): Attribute
     {
         return Attribute::make(
-            set: fn (string $email): string => Str::lower(trim($email)),
+            set: fn (string $email): string => self::normalizeEmail($email),
+        );
+    }
+
+    public static function normalizeEmail(string $email): string
+    {
+        return strtr(
+            trim($email, ' '),
+            self::ASCII_UPPERCASE,
+            self::ASCII_LOWERCASE,
         );
     }
 
