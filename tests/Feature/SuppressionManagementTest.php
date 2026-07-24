@@ -186,7 +186,7 @@ it('refuses local Cloudflare removal while the address remains upstream', functi
                 'result' => [
                     [
                         'id' => 'suppression-1',
-                        'email' => 'BLOCKED@example.com',
+                        'email' => ' BLOCKED@EXAMPLE.COM ',
                         'reason' => 'hard_bounce',
                         'created_at' => now()->toIso8601String(),
                         'expires_at' => null,
@@ -199,7 +199,7 @@ it('refuses local Cloudflare removal while the address remains upstream', functi
                 'result' => [
                     [
                         'id' => 'suppression-1',
-                        'email' => 'BLOCKED@example.com',
+                        'email' => ' BLOCKED@EXAMPLE.COM ',
                         'reason' => 'hard_bounce',
                         'created_at' => now()->toIso8601String(),
                         'expires_at' => null,
@@ -219,6 +219,48 @@ it('refuses local Cloudflare removal while the address remains upstream', functi
         ->toContain('Cloudflare')
         ->toContain('upstream');
     $this->assertModelExists($suppression);
+});
+
+it('removes a local Cloudflare blocker when upstream contains only a distinct non-ASCII variant', function () {
+    Http::preventStrayRequests();
+    [$owner, , $project, $source] = suppressionManagementFixture('cloudflare-non-ascii-distinct', 'cloudflare');
+    $suppression = managedSuppression($project, $source, ' ÄBC@example.com ');
+
+    Http::fake([
+        'https://api.cloudflare.com/client/v4/accounts/account-cloudflare-non-ascii-distinct/email/sending/suppression*' => Http::sequence()
+            ->push([
+                'success' => true,
+                'result' => [
+                    [
+                        'id' => 'suppression-non-ascii',
+                        'email' => 'äBC@example.com',
+                        'reason' => 'hard_bounce',
+                        'created_at' => now()->toIso8601String(),
+                        'expires_at' => null,
+                    ],
+                ],
+            ])
+            ->push(['success' => true, 'result' => []])
+            ->push([
+                'success' => true,
+                'result' => [
+                    [
+                        'id' => 'suppression-non-ascii',
+                        'email' => 'äBC@example.com',
+                        'reason' => 'hard_bounce',
+                        'created_at' => now()->toIso8601String(),
+                        'expires_at' => null,
+                    ],
+                ],
+            ])
+            ->push(['success' => true, 'result' => []]),
+    ]);
+
+    $this->actingAs($owner)
+        ->delete("/projects/{$project->slug}/suppressions/{$suppression->id}")
+        ->assertRedirect("/projects/{$project->slug}/suppressions");
+
+    $this->assertModelMissing($suppression);
 });
 
 it('removes the local Cloudflare blocker after a complete list confirms it is absent', function () {

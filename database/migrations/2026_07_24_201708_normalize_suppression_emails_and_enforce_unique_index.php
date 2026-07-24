@@ -11,6 +11,8 @@ return new class extends Migration
 {
     private const NORMALIZED_UNIQUE_INDEX = 'suppressions_project_normalized_email_unique';
 
+    private const ORIGINAL_UNIQUE_INDEX = 'suppressions_project_id_email_unique';
+
     /**
      * Run the migrations.
      */
@@ -36,10 +38,22 @@ return new class extends Migration
     {
         $driver = DB::connection()->getDriverName();
 
-        if (in_array($driver, ['mysql', 'mariadb', 'sqlsrv'], true)) {
+        if (in_array($driver, ['mysql', 'mariadb'], true)) {
+            DB::statement(
+                'ALTER TABLE `suppressions`'
+                .' DROP INDEX `'.self::NORMALIZED_UNIQUE_INDEX.'`,'
+                .' DROP COLUMN `normalized_email`,'
+                .' ADD UNIQUE INDEX `'.self::ORIGINAL_UNIQUE_INDEX.'` (`project_id`, `email`)',
+            );
+
+            return;
+        }
+
+        if ($driver === 'sqlsrv') {
             Schema::table('suppressions', function (Blueprint $table): void {
                 $table->dropUnique(self::NORMALIZED_UNIQUE_INDEX);
                 $table->dropColumn('normalized_email');
+                $table->unique(['project_id', 'email'], self::ORIGINAL_UNIQUE_INDEX);
             });
 
             return;
@@ -164,18 +178,24 @@ return new class extends Migration
         }
 
         if (in_array($driver, ['mysql', 'mariadb'], true)) {
-            Schema::table('suppressions', function (Blueprint $table): void {
-                $table->string('normalized_email')
-                    ->storedAs($this->normalizedEmailExpression());
-                $table->unique(['project_id', 'normalized_email'], self::NORMALIZED_UNIQUE_INDEX);
-            });
+            DB::statement(
+                'ALTER TABLE `suppressions`'
+                .' DROP INDEX `'.self::ORIGINAL_UNIQUE_INDEX.'`,'
+                .' ADD COLUMN `normalized_email` VARBINARY(1020)'
+                ." GENERATED ALWAYS AS (CAST({$normalizedEmailExpression} AS BINARY)) STORED,"
+                .' ADD UNIQUE INDEX `'.self::NORMALIZED_UNIQUE_INDEX.'` (`project_id`, `normalized_email`)',
+            );
 
             return;
         }
 
         if ($driver === 'sqlsrv') {
             Schema::table('suppressions', function (Blueprint $table): void {
-                $table->computed('normalized_email', $this->normalizedEmailExpression())
+                $table->dropUnique(self::ORIGINAL_UNIQUE_INDEX);
+                $table->computed(
+                    'normalized_email',
+                    $this->normalizedEmailExpression().' COLLATE Latin1_General_100_BIN2',
+                )
                     ->persisted();
                 $table->unique(['project_id', 'normalized_email'], self::NORMALIZED_UNIQUE_INDEX);
             });

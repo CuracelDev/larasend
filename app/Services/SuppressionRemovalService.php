@@ -6,7 +6,6 @@ use App\Enums\SourceProvider;
 use App\Exceptions\SuppressionProviderUnavailableException;
 use App\Exceptions\SuppressionRemovalException;
 use App\Models\Suppression;
-use Illuminate\Support\Str;
 use Throwable;
 
 class SuppressionRemovalService
@@ -59,9 +58,11 @@ class SuppressionRemovalService
             );
         }
 
-        $email = Str::lower($suppression->email);
+        $email = Suppression::normalizeEmail($suppression->email);
         $stillSuppressed = collect($upstreamSuppressions)
-            ->contains(fn (array $upstream): bool => Str::lower($upstream['email']) === $email);
+            ->contains(
+                fn (array $upstream): bool => Suppression::normalizeEmail($upstream['email']) === $email,
+            );
 
         if ($stillSuppressed) {
             throw new SuppressionRemovalException(

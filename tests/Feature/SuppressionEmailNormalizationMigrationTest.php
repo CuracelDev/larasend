@@ -395,3 +395,18 @@ it('locks affected duplicate rows before deleting a loser', function () {
         ->toContain('->lockForUpdate()')
         ->and($migrationSource)->toMatch('/lockForUpdate\\(\\).*whereIn\\([^;]+delete\\(\\)/s');
 });
+
+it('uses binary indexed values and replaces the conflicting legacy unique index on supported drivers', function () {
+    $migrationSource = file_get_contents(suppressionEmailNormalizationMigrationFile());
+
+    expect($migrationSource)
+        ->toContain("private const ORIGINAL_UNIQUE_INDEX = 'suppressions_project_id_email_unique'")
+        ->toContain('VARBINARY(1020)')
+        ->toContain('CAST(')
+        ->toContain(' AS BINARY)')
+        ->toContain('Latin1_General_100_BIN2')
+        ->toMatch('/DROP INDEX.*ORIGINAL_UNIQUE_INDEX/s')
+        ->toMatch('/ADD UNIQUE INDEX.*ORIGINAL_UNIQUE_INDEX/s')
+        ->toContain('dropUnique(self::ORIGINAL_UNIQUE_INDEX)')
+        ->toContain("unique(['project_id', 'email'], self::ORIGINAL_UNIQUE_INDEX)");
+});

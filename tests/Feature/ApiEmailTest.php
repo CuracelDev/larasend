@@ -8,11 +8,13 @@ use App\Models\Source;
 use App\Models\Suppression;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Services\EmailSendService;
 use App\Services\Providers\EmailProviderFactory;
 use App\Services\SesV2Client;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Validation\ValidationException;
 
 function larasendProjectFixture(): array
 {
@@ -255,6 +257,38 @@ it('blocks sends to suppressed recipients', function () {
 
     expect(Email::query()->count())->toBe(0);
     Queue::assertNothingPushed();
+});
+
+it('keeps non-ASCII suppression variants distinct while matching ASCII case and spaces', function () {
+    [$workspace, $project, $source] = larasendProjectFixture();
+
+    Queue::fake();
+
+    Suppression::create([
+        'workspace_id' => $workspace->id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email' => ' ÄBC@Example.com ',
+        'reason' => 'complaint',
+        'event_type' => 'complaint',
+    ]);
+
+    $allowed = app(EmailSendService::class)->send($project, $source, [
+        'from' => 'Larasend <receipts@example.com>',
+        'to' => ['Distinct <äBC@example.com>'],
+        'subject' => 'Distinct non-ASCII recipient',
+        'html' => '<h1>Hello</h1>',
+        'text' => 'Hello',
+    ]);
+
+    expect($allowed->subject)->toBe('Distinct non-ASCII recipient')
+        ->and(fn () => app(EmailSendService::class)->send($project, $source, [
+            'from' => 'Larasend <receipts@example.com>',
+            'to' => ['Blocked < ÄBC@EXAMPLE.COM >'],
+            'subject' => 'ASCII case and space variant',
+            'html' => '<h1>Hello</h1>',
+            'text' => 'Hello',
+        ]))->toThrow(ValidationException::class);
 });
 
 it('allows sends to expired suppressions but blocks active suppressions', function () {
