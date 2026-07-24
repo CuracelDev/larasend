@@ -58,9 +58,11 @@ class ApiKey extends Model
     {
         // Keys created before scopes existed have a null column and keep full access.
         // A present-but-empty array is an explicit grant of no scopes, so it denies everything.
-        $scopes = $this->scopes ?? ['send', 'read:activity'];
+        if ($this->scopes === null) {
+            return true;
+        }
 
-        return in_array($scope, $scopes, true);
+        return in_array($scope, $this->scopes, true);
     }
 
     public function project(): BelongsTo

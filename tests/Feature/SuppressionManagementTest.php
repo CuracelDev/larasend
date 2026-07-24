@@ -243,6 +243,32 @@ it('requires the manage suppressions scope for the API delete route', function (
     $this->assertModelMissing($suppression);
 });
 
+it('keeps legacy null-scoped API keys authorized while preserving project isolation', function () {
+    [, $workspace, $project, $source] = suppressionManagementFixture('api-legacy-scopes');
+    $ownedSuppression = managedSuppression($project, null, 'owned@example.com');
+    $otherProject = Project::create([
+        'workspace_id' => $workspace->id,
+        'name' => 'Legacy Other Project',
+        'slug' => 'api-legacy-other',
+    ]);
+    $otherSuppression = managedSuppression($otherProject, null, 'other@example.com');
+    $issued = ApiKey::issue($project, 'Legacy key', $source);
+
+    $issued['api_key']->forceFill(['scopes' => null])->save();
+
+    $this->withToken($issued['plain_text'])
+        ->deleteJson("/api/suppressions/{$otherSuppression->id}")
+        ->assertNotFound();
+
+    $this->assertModelExists($otherSuppression);
+
+    $this->withToken($issued['plain_text'])
+        ->deleteJson("/api/suppressions/{$ownedSuppression->id}")
+        ->assertNoContent();
+
+    $this->assertModelMissing($ownedSuppression);
+});
+
 it('returns not found when an API key targets another project suppression', function () {
     [, $workspace, $project, $source] = suppressionManagementFixture('api-project-one');
     $otherProject = Project::create([

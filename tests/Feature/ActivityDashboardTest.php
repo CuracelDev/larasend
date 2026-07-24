@@ -65,24 +65,38 @@ it('returns active suppression metadata and statistics', function () {
         'expires_at' => $expiredAt,
     ]);
 
+    Suppression::query()->create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => null,
+        'email' => 'legacy@example.com',
+        'reason' => 'manual',
+        'event_type' => 'legacy',
+    ]);
+
     $this->actingAs($user)
         ->get('/suppressions')
         ->assertSuccessful()
         ->assertInertia(fn ($page) => $page
             ->where('workspace.can_manage_suppressions', true)
             ->where('suppressionStats', [
-                'active' => 2,
+                'active' => 3,
                 'hard_bounce' => 1,
                 'complaint' => 1,
                 'expired' => 1,
             ])
-            ->where('sidebarCounts.suppressions', 2)
+            ->where('sidebarCounts.suppressions', 3)
             ->where('suppressions', fn ($suppressions) => collect($suppressions)->contains(fn (array $suppression) => $suppression['email'] === 'expired@example.com'
                 && $suppression['active'] === false
-                && $suppression['expires_at'] === $expiredAt->toIso8601String())
+                && $suppression['expires_at'] === $expiredAt->toIso8601String()
+                && ($suppression['provider'] ?? null) === 'ses')
                 && collect($suppressions)->contains(fn (array $suppression) => $suppression['email'] === 'ana.delpino@gmail.com'
                     && $suppression['active'] === true
-                    && $suppression['expires_at'] === null))
+                    && $suppression['expires_at'] === null
+                    && ($suppression['provider'] ?? null) === 'ses')
+                && collect($suppressions)->contains(fn (array $suppression) => $suppression['email'] === 'legacy@example.com'
+                    && array_key_exists('provider', $suppression)
+                    && $suppression['provider'] === null))
         );
 });
 
@@ -95,6 +109,10 @@ it('renders suppression management and api key scope controls in the activity pa
         ->toContain('suppressionStats.active')
         ->toContain('workspace.can_manage_suppressions')
         ->toContain('removeSuppression(email)')
+        ->toContain('provider: SourceProvider | null;')
+        ->toContain("suppression.provider === 'cloudflare'")
+        ->toContain("suppression.provider === 'ses'")
+        ->toContain('No sending provider is attached')
         ->toContain('email.active')
         ->toContain("? 'Active'")
         ->toContain(": 'Expired'")

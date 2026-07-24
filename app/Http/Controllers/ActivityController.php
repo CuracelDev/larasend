@@ -536,6 +536,7 @@ class ActivityController extends Controller
     private function suppressions(Project $project): array
     {
         return $project->suppressions()
+            ->with('source:id,provider')
             ->latest()
             ->limit(100)
             ->get()
@@ -544,6 +545,7 @@ class ActivityController extends Controller
                 'email' => $suppression->email,
                 'reason' => $suppression->reason,
                 'source' => $suppression->event_type,
+                'provider' => $suppression->source?->provider?->value,
                 'added' => $suppression->created_at->diffForHumans(short: true),
                 'expires' => $suppression->expires_at?->toDateString() ?? 'Never',
                 'active' => $suppression->expires_at === null || $suppression->expires_at->isFuture(),

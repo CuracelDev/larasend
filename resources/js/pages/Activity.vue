@@ -115,6 +115,7 @@ type SuppressionRow = {
     email: string;
     reason: string;
     source: string;
+    provider: SourceProvider | null;
     added: string;
     expires: string;
     active: boolean;
@@ -1123,6 +1124,18 @@ function deleteApiKey(apiKey: { id: number; name: string }): void {
     });
 }
 
+function suppressionRemovalCopy(suppression: SuppressionRow): string {
+    if (suppression.provider === 'cloudflare') {
+        return 'Larasend will verify this recipient is no longer on the Cloudflare suppression list before deleting the local record. Remove it in Cloudflare first if it is still listed there.';
+    }
+
+    if (suppression.provider === 'ses') {
+        return 'Larasend will remove this recipient from Amazon SES before deleting the local record. If the provider request fails, the suppression will remain in Larasend.';
+    }
+
+    return 'Larasend will remove this local suppression record. No sending provider is attached, so no provider suppression will be changed.';
+}
+
 function removeSuppression(suppression: SuppressionRow): void {
     if (removingSuppressionId.value !== null) {
         return;
@@ -1130,9 +1143,7 @@ function removeSuppression(suppression: SuppressionRow): void {
 
     openConfirmation({
         title: `Remove ${suppression.email}?`,
-        body: isCloudflare.value
-            ? 'Larasend will verify this recipient is no longer on the Cloudflare suppression list before deleting the local record. Remove it in Cloudflare first if it is still listed there.'
-            : `Larasend will remove this recipient from ${providerLabel.value} before deleting the local record. If the provider request fails, the suppression will remain in Larasend.`,
+        body: suppressionRemovalCopy(suppression),
         actionLabel: 'Remove suppression',
         tone: 'danger',
         onConfirm: () => {
