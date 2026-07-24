@@ -11,6 +11,8 @@ use RuntimeException;
 
 class CloudflareApiClient
 {
+    public const SUPPRESSION_MAX_PAGES_PER_SNAPSHOT = 100;
+
     /**
      * @return array{value: int|float|null, unit: string|null}
      */
@@ -35,17 +37,31 @@ class CloudflareApiClient
      */
     public function listSuppressions(Source $source): array
     {
+        return $this->listSuppressionsUntil($source);
+    }
+
+    /**
+     * @return array<int, array{id: string, email: string, reason: string, created_at: string|null, expires_at: string|null}>
+     */
+    private function listSuppressionsUntil(Source $source, ?float $deadline = null): array
+    {
         $suppressions = [];
         $page = 1;
 
         do {
-            $response = $this->request($source)->get('/email/sending/suppression', [
+            if ($page > self::SUPPRESSION_MAX_PAGES_PER_SNAPSHOT) {
+                throw new RuntimeException('Cloudflare suppression pagination exceeded its safe page limit. No destructive changes were made.');
+            }
+
+            [$requestTimeout, $connectTimeout] = $this->suppressionRequestTimeouts($deadline);
+            $response = $this->request($source, $requestTimeout, $connectTimeout)->get('/email/sending/suppression', [
                 'page' => $page,
                 'per_page' => 100,
                 'order' => 'created_at',
                 'direction' => 'asc',
             ]);
 
+            $this->ensureWithinSuppressionDeadline($deadline);
             $this->ensureSuccessful($response);
 
             $results = $response->json('result');
@@ -75,12 +91,17 @@ class CloudflareApiClient
      *
      * @return array<int, array{id: string, email: string, reason: string, created_at: string|null, expires_at: string|null}>
      */
-    public function listStableSuppressions(Source $source): array
+    public function listStableSuppressions(Source $source, float $budgetSeconds): array
     {
+        if ($budgetSeconds <= 0) {
+            throw new RuntimeException('Cloudflare suppression snapshot requires a positive time budget.');
+        }
+
+        $deadline = $this->monotonicTime() + $budgetSeconds;
         $previousSnapshot = null;
 
         for ($attempt = 0; $attempt < 3; $attempt++) {
-            $snapshot = $this->normalizeSuppressionSnapshot($this->listSuppressions($source));
+            $snapshot = $this->normalizeSuppressionSnapshot($this->listSuppressionsUntil($source, $deadline));
 
             if ($previousSnapshot !== null && $snapshot === $previousSnapshot) {
                 return $snapshot;
@@ -358,12 +379,16 @@ class CloudflareApiClient
         $this->ensureSuccessful($response);
     }
 
-    private function request(Source $source): PendingRequest
-    {
+    private function request(
+        Source $source,
+        float $requestTimeout = 15,
+        float $connectTimeout = 3,
+    ): PendingRequest {
         return Http::withToken((string) $source->cloudflare_api_token)
             ->baseUrl("https://api.cloudflare.com/client/v4/accounts/{$source->cloudflare_account_id}")
             ->acceptJson()
-            ->timeout(15);
+            ->connectTimeout($connectTimeout)
+            ->timeout($requestTimeout);
     }
 
     private function rootRequest(Source $source): PendingRequest
@@ -371,7 +396,40 @@ class CloudflareApiClient
         return Http::withToken((string) $source->cloudflare_api_token)
             ->baseUrl('https://api.cloudflare.com/client/v4')
             ->acceptJson()
+            ->connectTimeout(3)
             ->timeout(15);
+    }
+
+    /**
+     * @return array{float, float}
+     */
+    private function suppressionRequestTimeouts(?float $deadline): array
+    {
+        if ($deadline === null) {
+            return [15.0, 3.0];
+        }
+
+        $remaining = $deadline - $this->monotonicTime();
+
+        if ($remaining <= 0) {
+            throw new RuntimeException('Cloudflare suppression snapshot exceeded its time budget. No destructive changes were made.');
+        }
+
+        $requestTimeout = min(15.0, $remaining);
+
+        return [$requestTimeout, min(3.0, $requestTimeout)];
+    }
+
+    private function ensureWithinSuppressionDeadline(?float $deadline): void
+    {
+        if ($deadline !== null && $this->monotonicTime() >= $deadline) {
+            throw new RuntimeException('Cloudflare suppression snapshot exceeded its time budget. No destructive changes were made.');
+        }
+    }
+
+    protected function monotonicTime(): float
+    {
+        return hrtime(true) / 1_000_000_000;
     }
 
     private function ensureSuccessful(Response $response): void

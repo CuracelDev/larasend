@@ -11,6 +11,8 @@ use Throwable;
 
 class SuppressionRemovalService
 {
+    private const CLOUDFLARE_SNAPSHOT_BUDGET_SECONDS = 10;
+
     public function __construct(
         private SesV2Client $ses,
         private CloudflareApiClient $cloudflare,
@@ -44,7 +46,10 @@ class SuppressionRemovalService
         }
 
         try {
-            $upstreamSuppressions = $this->cloudflare->listStableSuppressions($source);
+            $upstreamSuppressions = $this->cloudflare->listStableSuppressions(
+                $source,
+                self::CLOUDFLARE_SNAPSHOT_BUDGET_SECONDS,
+            );
         } catch (Throwable $exception) {
             report($exception);
 

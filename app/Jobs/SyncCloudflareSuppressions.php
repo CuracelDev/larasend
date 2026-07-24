@@ -4,102 +4,57 @@ namespace App\Jobs;
 
 use App\Enums\SourceProvider;
 use App\Models\Source;
-use App\Services\CloudflareApiClient;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Queue\Attributes\UniqueFor;
-use Illuminate\Support\Carbon;
-use Illuminate\Support\Str;
 use Throwable;
 
 /**
- * Cloudflare has no delivery-event webhooks; suppressions accumulate on the
- * account-level list instead. This pull-only sync mirrors that list into
- * Larasend so suppressed recipients are blocked before a send is attempted.
+ * Dispatches a bounded page of independent Cloudflare suppression syncs.
  */
 #[UniqueFor(3900)]
 class SyncCloudflareSuppressions implements ShouldBeUnique, ShouldQueue
 {
     use Queueable;
 
-    public int $timeout = 75;
+    public const BATCH_SIZE = 25;
 
-    public function handle(CloudflareApiClient $cloudflare): void
+    public int $timeout = 15;
+
+    public function __construct(public ?int $afterSourceId = null) {}
+
+    public function handle(): void
     {
-        Source::query()
+        $sourceIds = Source::query()
             ->where('provider', SourceProvider::Cloudflare)
             ->whereNotNull('cloudflare_api_token')
             ->whereNotNull('cloudflare_account_id')
-            ->with('project')
-            ->each(function (Source $source) use ($cloudflare): void {
-                try {
-                    $this->syncSource($cloudflare, $source);
-                } catch (Throwable $exception) {
-                    // One bad token must not abort the run for other sources.
-                    report($exception);
-                }
-            });
+            ->when($this->afterSourceId !== null, fn ($query) => $query->where('id', '>', $this->afterSourceId))
+            ->orderBy('id')
+            ->limit(self::BATCH_SIZE + 1)
+            ->pluck('id');
+
+        $sourceIds
+            ->take(self::BATCH_SIZE)
+            ->each(fn (int $sourceId) => SyncCloudflareSourceSuppressions::dispatch($sourceId));
+
+        if ($sourceIds->count() > self::BATCH_SIZE) {
+            self::dispatch((int) $sourceIds[self::BATCH_SIZE - 1]);
+        }
     }
 
-    private function syncSource(CloudflareApiClient $cloudflare, Source $source): void
+    public function uniqueId(): string
     {
-        $project = $source->project;
-
-        if (! $project) {
-            return;
-        }
-
-        $suppressions = $cloudflare->listStableSuppressions($source);
-        $syncedEmails = [];
-
-        foreach ($suppressions as $suppression) {
-            $email = Str::lower(trim($suppression['email']));
-
-            if ($email === '') {
-                continue;
-            }
-
-            $values = [
-                'workspace_id' => $project->workspace_id,
-                'source_id' => $source->id,
-                'email_id' => null,
-                'reason' => $this->mapReason($suppression['reason']),
-                'event_type' => 'provider_sync',
-                'expires_at' => $suppression['expires_at'] ? Carbon::parse($suppression['expires_at']) : null,
-            ];
-
-            $existing = $project->suppressions()->firstOrCreate(
-                ['email' => $email],
-                $values,
-            );
-
-            if ($existing->source_id !== $source->id || $existing->event_type !== 'provider_sync') {
-                continue;
-            }
-
-            $existing->update($values);
-            $syncedEmails[] = $email;
-        }
-
-        $providerSyncSuppressions = $project->suppressions()
-            ->where('source_id', $source->id)
-            ->where('event_type', 'provider_sync');
-
-        if ($syncedEmails === []) {
-            $providerSyncSuppressions->delete();
-
-            return;
-        }
-
-        $providerSyncSuppressions->whereNotIn('email', $syncedEmails)->delete();
+        return $this->afterSourceId === null
+            ? 'cloudflare-suppressions:root'
+            : "cloudflare-suppressions:after:{$this->afterSourceId}";
     }
 
-    private function mapReason(string $reason): string
+    public function failed(?Throwable $exception): void
     {
-        return match (true) {
-            str_contains($reason, 'complaint') || str_contains($reason, 'spam') => 'complaint',
-            default => 'hard_bounce',
-        };
+        if ($exception !== null) {
+            report($exception);
+        }
     }
 }
