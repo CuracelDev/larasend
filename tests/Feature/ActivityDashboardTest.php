@@ -53,6 +53,12 @@ it('returns active suppression metadata and statistics', function () {
     $user = User::factory()->create();
     $project = seedActivityDashboardData($user);
     $source = $project->sources()->firstOrFail();
+    $cloudflareSource = $project->sources()->create([
+        'name' => 'Cloudflare',
+        'environment' => 'dev',
+        'provider' => 'cloudflare',
+        'webhook_token' => Str::random(64),
+    ]);
     $expiredAt = now()->subDay()->startOfSecond();
 
     Suppression::query()->create([
@@ -74,18 +80,27 @@ it('returns active suppression metadata and statistics', function () {
         'event_type' => 'legacy',
     ]);
 
+    Suppression::query()->create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => $cloudflareSource->id,
+        'email' => 'cloudflare@example.com',
+        'reason' => 'manual',
+        'event_type' => 'provider_sync',
+    ]);
+
     $this->actingAs($user)
         ->get('/suppressions')
         ->assertSuccessful()
         ->assertInertia(fn ($page) => $page
             ->where('workspace.can_manage_suppressions', true)
             ->where('suppressionStats', [
-                'active' => 3,
+                'active' => 4,
                 'hard_bounce' => 1,
                 'complaint' => 1,
                 'expired' => 1,
             ])
-            ->where('sidebarCounts.suppressions', 3)
+            ->where('sidebarCounts.suppressions', 4)
             ->where('suppressions', fn ($suppressions) => collect($suppressions)->contains(fn (array $suppression) => $suppression['email'] === 'expired@example.com'
                 && $suppression['active'] === false
                 && $suppression['expires_at'] === $expiredAt->toIso8601String()
@@ -96,7 +111,9 @@ it('returns active suppression metadata and statistics', function () {
                     && ($suppression['provider'] ?? null) === 'ses')
                 && collect($suppressions)->contains(fn (array $suppression) => $suppression['email'] === 'legacy@example.com'
                     && array_key_exists('provider', $suppression)
-                    && $suppression['provider'] === null))
+                    && $suppression['provider'] === null)
+                && collect($suppressions)->contains(fn (array $suppression) => $suppression['email'] === 'cloudflare@example.com'
+                    && $suppression['provider'] === 'cloudflare'))
         );
 });
 
@@ -106,6 +123,8 @@ it('renders suppression management and api key scope controls in the activity pa
     expect($activitySource)
         ->toContain("type ApiKeyScope = 'send' | 'read:activity' | 'manage:suppressions';")
         ->toContain("{ value: 'manage:suppressions', label: 'Manage suppressions' }")
+        ->toContain('if (apiKey.scopes === null)')
+        ->toContain('return apiKey.scopes;')
         ->toContain('suppressionStats.active')
         ->toContain('workspace.can_manage_suppressions')
         ->toContain('removeSuppression(email)')

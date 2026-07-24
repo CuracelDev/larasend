@@ -1082,9 +1082,11 @@ function toggleApiKeyScope(scope: ApiKeyScope): void {
 }
 
 function apiKeyScopes(apiKey: { scopes: ApiKeyScope[] | null }): ApiKeyScope[] {
-    return apiKey.scopes?.length
-        ? apiKey.scopes
-        : ['send', 'read:activity', 'manage:suppressions'];
+    if (apiKey.scopes === null) {
+        return ['send', 'read:activity', 'manage:suppressions'];
+    }
+
+    return apiKey.scopes;
 }
 
 function apiKeyScopeLabel(scope: ApiKeyScope): string {
