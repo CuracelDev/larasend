@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Enums\SourceProvider;
+use App\Exceptions\SuppressionRemovalException;
 use App\Http\Requests\DashboardSendEmailRequest;
 use App\Http\Requests\StoreApiKeyRequest;
 use App\Http\Requests\StoreDomainRequest;
@@ -15,6 +16,7 @@ use App\Models\Domain;
 use App\Models\Email;
 use App\Models\Project;
 use App\Models\Source;
+use App\Models\Suppression;
 use App\Models\User;
 use App\Models\WebhookEndpoint;
 use App\Services\DnsRecordVerifier;
@@ -22,6 +24,7 @@ use App\Services\EmailSendService;
 use App\Services\Providers\CloudflareInboundProvisioner;
 use App\Services\Providers\DomainOnboardingException;
 use App\Services\Providers\EmailProviderFactory;
+use App\Services\SuppressionRemovalService;
 use App\Support\ProjectContext;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -289,7 +292,7 @@ class DashboardActionController extends Controller
             $project,
             $apiKey->name,
             $apiKey->source,
-            $apiKey->scopes ?: ['send', 'read:activity'],
+            $apiKey->scopes,
             $apiKey->expires_at,
         );
 
@@ -298,6 +301,44 @@ class DashboardActionController extends Controller
         Inertia::flash('toast', ['type' => 'success', 'message' => 'API key rotated. Copy the new key now.']);
 
         return $this->toProjectSection($project, 'api-keys')->with('newApiKey', $issued['plain_text']);
+    }
+
+    public function destroySuppression(
+        Suppression $suppression,
+        SuppressionRemovalService $removalService,
+    ): RedirectResponse {
+        return $this->deleteSuppression($suppression, $removalService);
+    }
+
+    public function destroyProjectSuppression(
+        string $projectSlug,
+        Suppression $suppression,
+        SuppressionRemovalService $removalService,
+    ): RedirectResponse {
+        return $this->deleteSuppression($suppression, $removalService);
+    }
+
+    private function deleteSuppression(
+        Suppression $suppression,
+        SuppressionRemovalService $removalService,
+    ): RedirectResponse {
+        $project = $this->projectFor(Auth::user());
+        $this->authorizeWorkspaceCapability($project, 'manage_suppressions');
+
+        abort_unless($suppression->project_id === $project->id, 404);
+
+        try {
+            $removalService->remove($suppression);
+        } catch (SuppressionRemovalException $exception) {
+            Inertia::flash('toast', ['type' => 'error', 'message' => $exception->getMessage()]);
+
+            return $this->toProjectSection($project, 'suppressions')
+                ->withErrors(['suppression' => $exception->getMessage()]);
+        }
+
+        Inertia::flash('toast', ['type' => 'success', 'message' => 'Suppression removed.']);
+
+        return $this->toProjectSection($project, 'suppressions');
     }
 
     public function storeWebhookEndpoint(StoreWebhookEndpointRequest $request): RedirectResponse
@@ -579,6 +620,7 @@ class DashboardActionController extends Controller
             'manage_domains' => $project->workspace->canManageDomains($user),
             'manage_templates' => $project->workspace->canManageTemplates($user),
             'manage_webhooks' => $project->workspace->canManageWebhooks($user),
+            'manage_suppressions' => $project->workspace->canManageSuppressions($user),
             default => false,
         };
 

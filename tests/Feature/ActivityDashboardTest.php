@@ -49,6 +49,95 @@ it('renders the activity dashboard for authenticated users', function () {
         );
 });
 
+it('returns active suppression metadata and statistics', function () {
+    $user = User::factory()->create();
+    $project = seedActivityDashboardData($user);
+    $source = $project->sources()->firstOrFail();
+    $cloudflareSource = $project->sources()->create([
+        'name' => 'Cloudflare',
+        'environment' => 'dev',
+        'provider' => 'cloudflare',
+        'webhook_token' => Str::random(64),
+    ]);
+    $expiredAt = now()->subDay()->startOfSecond();
+
+    Suppression::query()->create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email' => 'expired@example.com',
+        'reason' => 'hard_bounce',
+        'event_type' => 'provider_sync',
+        'expires_at' => $expiredAt,
+    ]);
+
+    Suppression::query()->create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => null,
+        'email' => 'legacy@example.com',
+        'reason' => 'manual',
+        'event_type' => 'legacy',
+    ]);
+
+    Suppression::query()->create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => $cloudflareSource->id,
+        'email' => 'cloudflare@example.com',
+        'reason' => 'manual',
+        'event_type' => 'provider_sync',
+    ]);
+
+    $this->actingAs($user)
+        ->get('/suppressions')
+        ->assertSuccessful()
+        ->assertInertia(fn ($page) => $page
+            ->where('workspace.can_manage_suppressions', true)
+            ->where('suppressionStats', [
+                'active' => 4,
+                'hard_bounce' => 1,
+                'complaint' => 1,
+                'expired' => 1,
+            ])
+            ->where('sidebarCounts.suppressions', 4)
+            ->where('suppressions', fn ($suppressions) => collect($suppressions)->contains(fn (array $suppression) => $suppression['email'] === 'expired@example.com'
+                && $suppression['active'] === false
+                && $suppression['expires_at'] === $expiredAt->toIso8601String()
+                && ($suppression['provider'] ?? null) === 'ses')
+                && collect($suppressions)->contains(fn (array $suppression) => $suppression['email'] === 'ana.delpino@gmail.com'
+                    && $suppression['active'] === true
+                    && $suppression['expires_at'] === null
+                    && ($suppression['provider'] ?? null) === 'ses')
+                && collect($suppressions)->contains(fn (array $suppression) => $suppression['email'] === 'legacy@example.com'
+                    && array_key_exists('provider', $suppression)
+                    && $suppression['provider'] === null)
+                && collect($suppressions)->contains(fn (array $suppression) => $suppression['email'] === 'cloudflare@example.com'
+                    && $suppression['provider'] === 'cloudflare'))
+        );
+});
+
+it('renders suppression management and api key scope controls in the activity page source', function () {
+    $activitySource = file_get_contents(resource_path('js/pages/Activity.vue'));
+
+    expect($activitySource)
+        ->toContain("type ApiKeyScope = 'send' | 'read:activity' | 'manage:suppressions';")
+        ->toContain("{ value: 'manage:suppressions', label: 'Manage suppressions' }")
+        ->toContain('if (apiKey.scopes === null)')
+        ->toContain('return apiKey.scopes;')
+        ->toContain('suppressionStats.active')
+        ->toContain('workspace.can_manage_suppressions')
+        ->toContain('removeSuppression(email)')
+        ->toContain('provider: SourceProvider | null;')
+        ->toContain("suppression.provider === 'cloudflare'")
+        ->toContain("suppression.provider === 'ses'")
+        ->toContain('No sending provider is attached')
+        ->toContain('email.active')
+        ->toContain("? 'Active'")
+        ->toContain(": 'Expired'")
+        ->toContain('<div>Actions</div>');
+});
+
 it('renders recent active inbox conversations on the dashboard', function () {
     $user = User::factory()->create();
     $project = seedActivityDashboardData($user);
@@ -406,6 +495,63 @@ it('filters activity by search query and exports csv', function () {
     expect($export->streamedContent())
         ->toContain('Message ID')
         ->toContain('maya.okafor@northwind.io');
+});
+
+it('exports suppression rows with formula-safe values', function () {
+    $user = User::factory()->create();
+    $project = seedActivityDashboardData($user);
+    $source = $project->sources()->firstOrFail();
+
+    Suppression::query()->create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email' => '=recipient@example.com',
+        'reason' => '+reason',
+        'event_type' => '@provider_sync',
+        'expires_at' => now()->subDay(),
+    ]);
+
+    Suppression::query()->create([
+        'workspace_id' => $project->workspace_id,
+        'project_id' => $project->id,
+        'source_id' => $source->id,
+        'email' => '-recipient@example.com',
+        'reason' => "\t=reason",
+        'event_type' => "\r @provider_sync",
+        'expires_at' => now()->subDay(),
+    ]);
+
+    $export = $this->actingAs($user)
+        ->get('/activity/export?section=suppressions')
+        ->assertSuccessful()
+        ->assertHeader('content-type', 'text/csv; charset=UTF-8')
+        ->assertHeader('content-disposition', 'attachment; filename=larasend-suppressions.csv');
+
+    $content = $export->streamedContent();
+    $stream = fopen('php://memory', 'r+');
+    fwrite($stream, $content);
+    rewind($stream);
+    $rows = [];
+
+    while (($row = fgetcsv($stream)) !== false) {
+        $rows[] = $row;
+    }
+
+    fclose($stream);
+
+    expect($rows[0])
+        ->toBe(['Recipient', 'Reason', 'Source', 'Added at', 'Expires at', 'Status']);
+
+    $directFormulaRow = collect($rows)->first(fn (array $row): bool => str_contains($row[0] ?? '', '=recipient@example.com'));
+    $controlWhitespaceRow = collect($rows)->first(fn (array $row): bool => str_contains($row[0] ?? '', '-recipient@example.com'));
+
+    expect(array_slice($directFormulaRow, 0, 3))
+        ->toBe(["'=recipient@example.com", "'+reason", "'@provider_sync"])
+        ->and($directFormulaRow[5])->toBe('Expired')
+        ->and(array_slice($controlWhitespaceRow, 0, 3))
+        ->toBe(["'-recipient@example.com", "'\t=reason", "'\r @provider_sync"])
+        ->and($controlWhitespaceRow[5])->toBe('Expired');
 });
 
 it('allows workspace users to download raw mime content', function () {

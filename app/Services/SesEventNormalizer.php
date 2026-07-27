@@ -8,6 +8,7 @@ use App\Models\EmailEvent;
 use App\Models\Source;
 use App\Models\Suppression;
 use Carbon\CarbonImmutable;
+use Illuminate\Database\ConnectionInterface;
 
 class SesEventNormalizer
 {
@@ -109,19 +110,78 @@ class SesEventNormalizer
             return;
         }
 
-        Suppression::query()->updateOrCreate(
-            [
-                'project_id' => $email->project_id,
-                'email' => $recipient,
-            ],
-            [
-                'workspace_id' => $email->workspace_id,
-                'source_id' => $email->source_id,
-                'email_id' => $email->id,
-                'reason' => $reason,
-                'event_type' => $eventType,
-                'expires_at' => null,
-            ],
+        $attributes = (new Suppression)->forceFill([
+            'project_id' => $email->project_id,
+            'email' => Suppression::normalizeEmail($recipient),
+            'workspace_id' => $email->workspace_id,
+            'source_id' => $email->source_id,
+            'email_id' => $email->id,
+            'reason' => $reason,
+            'event_type' => $eventType,
+            'expires_at' => null,
+        ])->getAttributes();
+
+        $connection = (new Suppression)->getConnection();
+
+        if ($connection->getDriverName() === 'sqlsrv') {
+            $this->upsertSqlServerSuppression($connection, $attributes);
+
+            return;
+        }
+
+        Suppression::query()->upsert(
+            [$attributes],
+            ['project_id', 'email'],
+            ['workspace_id', 'source_id', 'email_id', 'reason', 'event_type', 'expires_at'],
+        );
+    }
+
+    /**
+     * SQL Server's MERGE must match the generated binary key rather than the
+     * case-insensitive raw email column. HOLDLOCK keeps the match-and-insert
+     * decision atomic with concurrent webhook deliveries.
+     *
+     * @param  array<string, mixed>  $attributes
+     */
+    private function upsertSqlServerSuppression(ConnectionInterface $connection, array $attributes): void
+    {
+        $timestamp = now();
+        $values = [
+            $attributes['workspace_id'],
+            $attributes['project_id'],
+            $attributes['source_id'],
+            $attributes['email_id'],
+            $attributes['email'],
+            Suppression::normalizeEmail($attributes['email']),
+            $attributes['reason'],
+            $attributes['event_type'],
+            $attributes['expires_at'],
+            $timestamp,
+            $timestamp,
+        ];
+
+        $connection->statement(
+            <<<'SQL'
+                MERGE INTO [suppressions] WITH (HOLDLOCK) AS [target]
+                USING (VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)) AS [source]
+                    ([workspace_id], [project_id], [source_id], [email_id], [email], [email_normalized], [reason], [event_type], [expires_at], [created_at], [updated_at])
+                ON [target].[project_id] = [source].[project_id]
+                    AND [target].[email_normalized] = [source].[email_normalized] COLLATE Latin1_General_100_BIN2
+                WHEN MATCHED THEN
+                    UPDATE SET
+                        [target].[workspace_id] = [source].[workspace_id],
+                        [target].[source_id] = [source].[source_id],
+                        [target].[email_id] = [source].[email_id],
+                        [target].[email] = [source].[email],
+                        [target].[reason] = [source].[reason],
+                        [target].[event_type] = [source].[event_type],
+                        [target].[expires_at] = [source].[expires_at],
+                        [target].[updated_at] = [source].[updated_at]
+                WHEN NOT MATCHED THEN
+                    INSERT ([workspace_id], [project_id], [source_id], [email_id], [email], [reason], [event_type], [expires_at], [created_at], [updated_at])
+                    VALUES ([source].[workspace_id], [source].[project_id], [source].[source_id], [source].[email_id], [source].[email], [source].[reason], [source].[event_type], [source].[expires_at], [source].[created_at], [source].[updated_at]);
+                SQL,
+            $values,
         );
     }
 

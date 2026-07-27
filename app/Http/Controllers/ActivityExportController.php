@@ -19,6 +19,11 @@ class ActivityExportController extends Controller
             is_string($projectSlug) ? $projectSlug : null,
         );
         $section = (string) $request->query('section', 'activity');
+
+        if ($section === 'suppressions') {
+            return $this->suppressionExport($project);
+        }
+
         $emails = $this->activityEmailsQuery($project, $request, $section)->get();
 
         return response()->streamDownload(function () use ($emails) {
@@ -40,6 +45,38 @@ class ActivityExportController extends Controller
 
             fclose($handle);
         }, 'larasend-activity.csv', ['Content-Type' => 'text/csv']);
+    }
+
+    private function suppressionExport(Project $project): StreamedResponse
+    {
+        $suppressions = $project->suppressions()->latest()->get();
+
+        return response()->streamDownload(function () use ($suppressions): void {
+            $handle = fopen('php://output', 'w');
+            fputcsv($handle, ['Recipient', 'Reason', 'Source', 'Added at', 'Expires at', 'Status']);
+
+            foreach ($suppressions as $suppression) {
+                fputcsv($handle, [
+                    $this->formulaSafe($suppression->email),
+                    $this->formulaSafe($suppression->reason),
+                    $this->formulaSafe($suppression->event_type),
+                    $suppression->created_at->toIso8601String(),
+                    $suppression->expires_at?->toIso8601String() ?? '',
+                    $suppression->expires_at === null || $suppression->expires_at->isFuture() ? 'Active' : 'Expired',
+                ]);
+            }
+
+            fclose($handle);
+        }, 'larasend-suppressions.csv', ['Content-Type' => 'text/csv']);
+    }
+
+    private function formulaSafe(string $value): string
+    {
+        if (preg_match('/\A[\x00-\x20]*[=+\-@]/', $value) === 1) {
+            return "'{$value}";
+        }
+
+        return $value;
     }
 
     private function activityEmailsQuery(Project $project, Request $request, string $section): HasMany

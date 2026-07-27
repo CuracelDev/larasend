@@ -84,6 +84,7 @@ class ActivityController extends Controller
                 'can_manage_members' => $project->workspace->canManageMembers($user),
                 'can_manage_api_keys' => $project->workspace->canManageApiKeys($user),
                 'can_manage_domains' => $project->workspace->canManageDomains($user),
+                'can_manage_suppressions' => $project->workspace->canManageSuppressions($user),
                 'can_send' => $project->workspace->canSendEmail($user),
             ],
             'workspaceMembers' => $this->workspaceMembers($project),
@@ -154,6 +155,7 @@ class ActivityController extends Controller
             'webhookStats' => $this->webhookStats($project),
             'webhookDeliveries' => $this->webhookDeliveries($project),
             'suppressions' => $this->suppressions($project),
+            'suppressionStats' => $this->suppressionStats($project),
             'newWebhookEndpoint' => session('newWebhookEndpoint'),
             'sesWebhookUrl' => $source && $source->provider === SourceProvider::Ses
                 ? route('webhooks.ses', $source->webhook_token)
@@ -168,7 +170,7 @@ class ActivityController extends Controller
                 'sent' => $project->emails()->whereIn('status', ['sent', 'delivered', 'opened', 'clicked'])->count(),
                 'bounces' => $project->emails()->where('status', 'bounced')->count(),
                 'complaints' => $project->emails()->where('status', 'complained')->count(),
-                'suppressions' => $project->suppressions()->count(),
+                'suppressions' => $project->suppressions()->active()->count(),
             ],
             'inboxUnread' => $this->activeInboxThreads($project)->whereNull('read_at')->count(),
             'recentThreads' => $section === 'activity'
@@ -534,6 +536,7 @@ class ActivityController extends Controller
     private function suppressions(Project $project): array
     {
         return $project->suppressions()
+            ->with('source:id,provider')
             ->latest()
             ->limit(100)
             ->get()
@@ -542,10 +545,28 @@ class ActivityController extends Controller
                 'email' => $suppression->email,
                 'reason' => $suppression->reason,
                 'source' => $suppression->event_type,
+                'provider' => $suppression->source?->provider?->value,
                 'added' => $suppression->created_at->diffForHumans(short: true),
                 'expires' => $suppression->expires_at?->toDateString() ?? 'Never',
+                'active' => $suppression->expires_at === null || $suppression->expires_at->isFuture(),
+                'expires_at' => $suppression->expires_at?->toIso8601String(),
             ])
             ->all();
+    }
+
+    /**
+     * @return array{active: int, hard_bounce: int, complaint: int, expired: int}
+     */
+    private function suppressionStats(Project $project): array
+    {
+        $suppressions = $project->suppressions();
+
+        return [
+            'active' => (clone $suppressions)->active()->count(),
+            'hard_bounce' => (clone $suppressions)->active()->where('reason', 'hard_bounce')->count(),
+            'complaint' => (clone $suppressions)->active()->where('reason', 'complaint')->count(),
+            'expired' => (clone $suppressions)->whereNotNull('expires_at')->where('expires_at', '<=', now())->count(),
+        ];
     }
 
     /**

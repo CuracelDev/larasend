@@ -2,6 +2,8 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -9,6 +11,10 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 class Suppression extends Model
 {
     use HasFactory;
+
+    private const ASCII_LOWERCASE = 'abcdefghijklmnopqrstuvwxyz';
+
+    private const ASCII_UPPERCASE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
     protected $fillable = [
         'workspace_id',
@@ -26,6 +32,59 @@ class Suppression extends Model
         return [
             'expires_at' => 'datetime',
         ];
+    }
+
+    protected function email(): Attribute
+    {
+        return Attribute::make(
+            set: fn (string $email): string => self::normalizeEmail($email),
+        );
+    }
+
+    public static function normalizeEmail(string $email): string
+    {
+        return strtr(
+            trim($email, ' '),
+            self::ASCII_UPPERCASE,
+            self::ASCII_LOWERCASE,
+        );
+    }
+
+    /**
+     * @param  Builder<Suppression>  $query
+     */
+    public function scopeWhereNormalizedEmail(Builder $query, string $email): void
+    {
+        $query->where($this->normalizedEmailColumn(), self::normalizeEmail($email));
+    }
+
+    /**
+     * @param  Builder<Suppression>  $query
+     * @param  iterable<int, string>  $emails
+     */
+    public function scopeWhereNormalizedEmailIn(Builder $query, iterable $emails): void
+    {
+        $query->whereIn($this->normalizedEmailColumn(), $this->normalizeEmails($emails));
+    }
+
+    /**
+     * @param  Builder<Suppression>  $query
+     * @param  iterable<int, string>  $emails
+     */
+    public function scopeWhereNormalizedEmailNotIn(Builder $query, iterable $emails): void
+    {
+        $query->whereNotIn($this->normalizedEmailColumn(), $this->normalizeEmails($emails));
+    }
+
+    /**
+     * @param  Builder<Suppression>  $query
+     */
+    public function scopeActive(Builder $query): void
+    {
+        $query->where(function (Builder $query): void {
+            $query->whereNull('expires_at')
+                ->orWhere('expires_at', '>', now());
+        });
     }
 
     public function workspace(): BelongsTo
@@ -46,5 +105,25 @@ class Suppression extends Model
     public function emailMessage(): BelongsTo
     {
         return $this->belongsTo(Email::class, 'email_id');
+    }
+
+    private function normalizedEmailColumn(): string
+    {
+        return in_array($this->getConnection()->getDriverName(), ['mysql', 'mariadb', 'sqlsrv'], true)
+            ? 'email_normalized'
+            : 'email';
+    }
+
+    /**
+     * @param  iterable<int, string>  $emails
+     * @return array<int, string>
+     */
+    private function normalizeEmails(iterable $emails): array
+    {
+        return collect($emails)
+            ->map(fn (string $email): string => self::normalizeEmail($email))
+            ->uniqueStrict()
+            ->values()
+            ->all();
     }
 }

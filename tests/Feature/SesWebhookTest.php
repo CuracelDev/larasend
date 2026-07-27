@@ -7,6 +7,8 @@ use App\Models\Suppression;
 use App\Models\User;
 use App\Models\WebhookLog;
 use App\Models\Workspace;
+use App\Services\SesEventNormalizer;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 
 function sesWebhookFixture(): array
@@ -171,4 +173,71 @@ it('records suppressions for permanent ses bounces and complaints', function () 
     expect(Suppression::query()->where('email', 'maya@example.com')->where('reason', 'hard_bounce')->exists())->toBeTrue()
         ->and(Suppression::query()->where('email', 'abuse@example.com')->where('reason', 'complaint')->exists())->toBeTrue()
         ->and($email->fresh()->status)->toBe('complained');
+});
+
+it('atomically replaces Cloudflare ownership when recording an SES complaint', function () {
+    [$source, $email] = sesWebhookFixture();
+    $cloudflareSource = Source::create([
+        'project_id' => $email->project_id,
+        'name' => 'Cloudflare',
+        'environment' => 'staging',
+        'provider' => 'cloudflare',
+        'cloudflare_api_token' => 'token',
+        'cloudflare_account_id' => 'account',
+        'webhook_token' => 'cloudflare-webhook-token',
+    ]);
+    $suppression = Suppression::create([
+        'workspace_id' => $email->workspace_id,
+        'project_id' => $email->project_id,
+        'source_id' => $cloudflareSource->id,
+        'email' => 'abuse@example.com',
+        'reason' => 'hard_bounce',
+        'event_type' => 'provider_sync',
+        'expires_at' => now()->addDay(),
+    ]);
+    $suppression->forceFill([
+        'created_at' => now()->subDay(),
+        'updated_at' => now()->subDay(),
+    ])->saveQuietly();
+    $originalCreatedAt = $suppression->created_at;
+    $payload = [
+        'eventType' => 'Complaint',
+        'mail' => [
+            'messageId' => 'ses-1',
+            'timestamp' => now()->toIso8601String(),
+            'destination' => ['Abuse@Example.com'],
+        ],
+        'complaint' => [
+            'timestamp' => now()->toIso8601String(),
+            'complainedRecipients' => [
+                ['emailAddress' => 'Abuse@Example.com'],
+            ],
+        ],
+    ];
+
+    DB::flushQueryLog();
+    DB::enableQueryLog();
+
+    app(SesEventNormalizer::class)->record($source, $payload);
+
+    $suppressionQueries = collect(DB::getQueryLog())
+        ->pluck('query')
+        ->filter(fn (string $query): bool => str_contains(strtolower($query), 'suppressions'))
+        ->values();
+    DB::disableQueryLog();
+
+    expect($suppression->fresh())
+        ->id->toBe($suppression->id)
+        ->workspace_id->toBe($email->workspace_id)
+        ->project_id->toBe($email->project_id)
+        ->source_id->toBe($source->id)
+        ->email_id->toBe($email->id)
+        ->email->toBe('abuse@example.com')
+        ->reason->toBe('complaint')
+        ->event_type->toBe('complaint')
+        ->expires_at->toBeNull()
+        ->created_at->toEqual($originalCreatedAt)
+        ->updated_at->toBeGreaterThan($originalCreatedAt)
+        ->and($suppressionQueries)->toHaveCount(1)
+        ->and($suppressionQueries->sole())->toMatch('/on conflict|on duplicate key update/i');
 });
