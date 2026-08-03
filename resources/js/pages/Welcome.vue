@@ -1694,13 +1694,15 @@ pre {
 
 .install-cmd code {
     flex: 1;
-    overflow-x: auto;
+    min-width: 0;
+    overflow: hidden;
     color: #d8dee9;
     font:
         500 12.5px/1.6 'Geist Mono',
         ui-monospace,
         monospace;
     text-align: left;
+    text-overflow: ellipsis;
     white-space: nowrap;
 }
 
