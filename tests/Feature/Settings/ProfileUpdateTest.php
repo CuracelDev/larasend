@@ -1,6 +1,10 @@
 <?php
 
+use App\Models\Project;
+use App\Models\Source;
 use App\Models\User;
+use App\Models\Workspace;
+use App\Support\ProjectContext;
 
 test('profile page is displayed', function () {
     $user = User::factory()->create();
@@ -9,7 +13,38 @@ test('profile page is displayed', function () {
         ->actingAs($user)
         ->get(route('profile.edit'));
 
-    $response->assertOk();
+    $response
+        ->assertOk()
+        ->assertInertia(fn ($page) => $page
+            ->component('settings/Profile')
+            ->where('settingsNavigation', null)
+        );
+
+    expect(Workspace::query()->count())->toBe(0)
+        ->and(Project::query()->count())->toBe(0)
+        ->and(Source::query()->count())->toBe(0);
+});
+
+test('profile page keeps the project navigation for onboarded users', function () {
+    $user = User::factory()->create();
+
+    app(ProjectContext::class)->projectFor($user);
+
+    $response = $this
+        ->actingAs($user)
+        ->get(route('profile.edit'));
+
+    $response
+        ->assertOk()
+        ->assertInertia(fn ($page) => $page
+            ->component('settings/Profile')
+            ->where('settingsNavigation.project.name', 'My Project')
+            ->where('settingsNavigation.project.slug', 'my-project')
+            ->where('settingsNavigation.project.path', '/projects/my-project')
+            ->where('settingsNavigation.projects.0.is_current', true)
+            ->has('settingsNavigation.counts')
+            ->where('settingsNavigation.inbox_unread', 0)
+        );
 });
 
 test('profile information can be updated', function () {
