@@ -29,3 +29,11 @@ test('home still renders the landing page for signed in users when enabled', fun
         ->assertOk()
         ->assertInertia(fn ($page) => $page->component('Welcome'));
 });
+
+test('landing page command preview clips overflow without a scrollbar', function () {
+    $welcomeSource = file_get_contents(resource_path('js/pages/Welcome.vue'));
+
+    expect($welcomeSource)
+        ->toMatch('/\\.install-cmd code \\{[^}]*min-width: 0;[^}]*overflow: hidden;[^}]*text-overflow: ellipsis;/s')
+        ->not->toMatch('/\\.install-cmd code \\{[^}]*overflow-x: auto;/s');
+});
