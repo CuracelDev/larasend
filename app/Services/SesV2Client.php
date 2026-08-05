@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Source;
 use Illuminate\Http\Client\RequestException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -219,11 +220,20 @@ class SesV2Client
             ];
         }
 
-        if (! app()->environment('production')) {
-            throw new RuntimeException('Configure SES credentials or run Larasend on production infrastructure with an attached EC2 instance role.');
-        }
-
         return $this->instanceRoleCredentials();
+    }
+
+    public function hasInstanceRoleCredentials(): bool
+    {
+        return Cache::remember('larasend:ses-instance-role-available', now()->addMinutes(5), function (): bool {
+            try {
+                $this->instanceRoleCredentials();
+
+                return true;
+            } catch (Throwable) {
+                return false;
+            }
+        });
     }
 
     /**
@@ -233,6 +243,7 @@ class SesV2Client
     {
         try {
             $token = Http::withHeaders(['X-aws-ec2-metadata-token-ttl-seconds' => '21600'])
+                ->connectTimeout(1)
                 ->timeout(2)
                 ->put('http://169.254.169.254/latest/api/token')
                 ->throw()
@@ -240,12 +251,14 @@ class SesV2Client
 
             $headers = ['X-aws-ec2-metadata-token' => $token];
             $role = trim(Http::withHeaders($headers)
+                ->connectTimeout(1)
                 ->timeout(2)
                 ->get('http://169.254.169.254/latest/meta-data/iam/security-credentials/')
                 ->throw()
                 ->body());
 
             $credentials = Http::withHeaders($headers)
+                ->connectTimeout(1)
                 ->timeout(2)
                 ->get("http://169.254.169.254/latest/meta-data/iam/security-credentials/{$role}")
                 ->throw()

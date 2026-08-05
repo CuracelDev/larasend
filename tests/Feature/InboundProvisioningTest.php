@@ -4,6 +4,7 @@ use App\Models\Project;
 use App\Models\Source;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Services\Providers\CloudflareInboundProvisioner;
 use Illuminate\Support\Facades\Http;
 
 function provisioningFixture(): array
@@ -32,15 +33,60 @@ function provisioningFixture(): array
     return [$user, $project, $source, $domain];
 }
 
+it('uses a distinct inbound worker for each source', function () {
+    [, , $source] = provisioningFixture();
+    $secondSource = $source->replicate(['webhook_token']);
+    $secondSource->environment = 'staging';
+    $secondSource->webhook_token = 'another-source-token';
+    $secondSource->save();
+    $provisioner = app(CloudflareInboundProvisioner::class);
+
+    expect($provisioner->workerName($source))
+        ->toStartWith('larasend-inbound-')
+        ->not->toBe($provisioner->workerName($secondSource));
+});
+
+it('prevents two projects from taking over the same cloudflare zone catch all', function () {
+    [$user, $project, , $domain] = provisioningFixture();
+    $otherProject = Project::create([
+        'workspace_id' => $project->workspace_id,
+        'name' => 'Other inbox',
+        'slug' => 'other-inbox',
+    ]);
+    $otherProject->domains()->create([
+        'domain' => 'support.example.com',
+        'status' => 'verified',
+        'dns_records' => [],
+        'verified_at' => now(),
+        'inbound_enabled_at' => now(),
+        'inbound_domain' => 'example.com',
+    ]);
+    Http::fake([
+        'https://api.cloudflare.com/client/v4/zones?*' => Http::response([
+            'success' => true,
+            'result' => [['id' => 'zone-9', 'name' => 'example.com', 'account' => ['id' => 'acc-prov', 'name' => 'Prov']]],
+        ]),
+    ]);
+
+    $this->actingAs($user)
+        ->post("/projects/{$project->slug}/domains/{$domain->id}/inbound")
+        ->assertRedirect("/projects/{$project->slug}/identities");
+
+    expect($domain->fresh()->inbound_enabled_at)->toBeNull()
+        ->and(session('inboundError'))->toContain('already connected to another Larasend project');
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/workers/scripts/'));
+});
+
 it('provisions cloudflare inbound end to end: worker, routing, catch-all', function () {
     [$user, $project, $source, $domain] = provisioningFixture();
+    $workerName = 'larasend-inbound-'.substr(hash('sha256', $source->webhook_token), 0, 16);
 
     Http::fake([
         'https://api.cloudflare.com/client/v4/zones?*' => Http::response([
             'success' => true,
             'result' => [['id' => 'zone-9', 'name' => 'example.com', 'account' => ['id' => 'acc-prov', 'name' => 'Prov']]],
         ]),
-        'https://api.cloudflare.com/client/v4/accounts/acc-prov/workers/scripts/larasend-inbound' => Http::response(['success' => true, 'result' => ['id' => 'larasend-inbound']]),
+        'https://api.cloudflare.com/client/v4/accounts/acc-prov/workers/scripts/*' => Http::response(['success' => true, 'result' => ['id' => $workerName]]),
         'https://api.cloudflare.com/client/v4/zones/zone-9/email/routing/enable' => Http::response(['success' => true, 'result' => ['enabled' => true]]),
         'https://api.cloudflare.com/client/v4/zones/zone-9/email/routing/rules/catch_all' => Http::response(['success' => true, 'result' => ['enabled' => true]]),
         'https://cloudflare-dns.com/*' => Http::response([
@@ -53,10 +99,11 @@ it('provisions cloudflare inbound end to end: worker, routing, catch-all', funct
         ->post("/projects/{$project->slug}/domains/{$domain->id}/inbound")
         ->assertRedirect("/projects/{$project->slug}/identities");
 
-    expect($domain->fresh()->inbound_enabled_at)->not->toBeNull();
+    expect($domain->fresh()->inbound_enabled_at)->not->toBeNull()
+        ->and($domain->fresh()->inbound_domain)->toBe('example.com');
 
-    Http::assertSent(function ($request) use ($source) {
-        if (! str_contains($request->url(), '/workers/scripts/larasend-inbound')) {
+    Http::assertSent(function ($request) use ($source, $workerName) {
+        if (! str_contains($request->url(), '/workers/scripts/'.$workerName)) {
             return false;
         }
 
@@ -69,7 +116,7 @@ it('provisions cloudflare inbound end to end: worker, routing, catch-all', funct
 
     Http::assertSent(fn ($request) => str_contains($request->url(), '/email/routing/rules/catch_all')
         && ($request->data()['actions'][0]['type'] ?? null) === 'worker'
-        && ($request->data()['actions'][0]['value'][0] ?? null) === 'larasend-inbound');
+        && ($request->data()['actions'][0]['value'][0] ?? null) === $workerName);
 });
 
 it('surfaces the missing worker permission with manual instructions', function () {
@@ -80,7 +127,7 @@ it('surfaces the missing worker permission with manual instructions', function (
             'success' => true,
             'result' => [['id' => 'zone-9', 'name' => 'example.com', 'account' => ['id' => 'acc-prov', 'name' => 'Prov']]],
         ]),
-        'https://api.cloudflare.com/client/v4/accounts/acc-prov/workers/scripts/larasend-inbound' => Http::response([
+        'https://api.cloudflare.com/client/v4/accounts/acc-prov/workers/scripts/*' => Http::response([
             'success' => false,
             'errors' => [['code' => 10000, 'message' => 'Authentication error']],
         ], 403),
@@ -121,7 +168,7 @@ it('publishes routing mx records directly when the enable endpoint is forbidden'
             'success' => true,
             'result' => [['id' => 'zone-9', 'name' => 'example.com', 'account' => ['id' => 'acc-prov', 'name' => 'Prov']]],
         ]),
-        'https://api.cloudflare.com/client/v4/accounts/acc-prov/workers/scripts/larasend-inbound' => Http::response(['success' => true, 'result' => ['id' => 'larasend-inbound']]),
+        'https://api.cloudflare.com/client/v4/accounts/acc-prov/workers/scripts/*' => Http::response(['success' => true, 'result' => ['id' => 'larasend-inbound']]),
         'https://api.cloudflare.com/client/v4/zones/zone-9/email/routing/rules/catch_all' => Http::response(['success' => true, 'result' => ['enabled' => true]]),
         'https://api.cloudflare.com/client/v4/zones/zone-9/email/routing/enable' => Http::response([
             'success' => false,

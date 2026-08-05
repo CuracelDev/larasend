@@ -34,12 +34,14 @@ function replyFixture(): array
         'status' => 'verified',
         'dns_records' => [],
         'verified_at' => now(),
+        'inbound_enabled_at' => now(),
+        'inbound_domain' => 'example.com',
     ]);
 
     return [$user, $project, $source];
 }
 
-function receiveReplyableEmail($test, Source $source, string $withAttachment = ''): void
+function receiveReplyableEmail($test, Source $source, string $withAttachment = '', string $messageId = 'q-1@customer.test'): void
 {
     $attachment = $withAttachment !== '' ? implode("\r\n", [
         '--BOUND',
@@ -54,7 +56,7 @@ function receiveReplyableEmail($test, Source $source, string $withAttachment = '
         'From: Maya Lin <maya@customer.test>',
         'To: hello@example.com',
         'Subject: Question about billing',
-        'Message-ID: <q-1@customer.test>',
+        "Message-ID: <{$messageId}>",
         'MIME-Version: 1.0',
         'Content-Type: multipart/mixed; boundary="BOUND"',
         '',
@@ -239,12 +241,12 @@ it('snoozes threads out of the inbox and wakes them on new inbound mail', functi
     $snoozed->assertInertia(fn ($page) => $page->has('threads', 1));
 
     // A new customer message wakes the thread immediately.
-    receiveReplyableEmail($this, $source);
+    receiveReplyableEmail($this, $source, messageId: 'q-2@customer.test');
 
     expect($thread->fresh()->snoozed_until)->toBeNull();
 });
 
-it('adds internal notes to the conversation timeline without sending email', function () {
+it('prevents read only members from adding internal notes', function () {
     [$user, $project, $source] = replyFixture();
 
     Queue::fake();
@@ -259,17 +261,10 @@ it('adds internal notes to the conversation timeline without sending email', fun
         ->post("/projects/{$project->slug}/threads/{$thread->public_id}/notes", [
             'body' => 'Customer is on the enterprise plan — loop in success.',
         ])
-        ->assertRedirect();
+        ->assertForbidden();
 
     expect(Email::query()->count())->toBe(0)
-        ->and($thread->notes()->count())->toBe(1);
-
-    $this->actingAs($user)
-        ->get("/projects/{$project->slug}/inbox?thread={$thread->public_id}")
-        ->assertInertia(fn ($page) => $page
-            ->where('selectedThread.messages.1.direction', 'note')
-            ->where('selectedThread.messages.1.from', 'Rita Reader')
-            ->where('selectedThread.messages.1.text', 'Customer is on the enterprise plan — loop in success.'));
+        ->and($thread->notes()->count())->toBe(0);
 });
 
 it('streams inbound attachments from the stored mime', function () {

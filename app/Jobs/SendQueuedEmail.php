@@ -5,18 +5,21 @@ namespace App\Jobs;
 use App\Events\EmailActivityUpdated;
 use App\Models\Email;
 use App\Services\Providers\EmailProviderFactory;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Storage;
 use Throwable;
 
-class SendQueuedEmail implements ShouldQueue
+class SendQueuedEmail implements ShouldBeUnique, ShouldQueue
 {
     use Queueable;
 
     public int $tries = 3;
 
     public int $timeout = 30;
+
+    public int $uniqueFor = 3600;
 
     /**
      * @return array<int, int>
@@ -28,13 +31,31 @@ class SendQueuedEmail implements ShouldQueue
 
     public function __construct(public int $emailId) {}
 
+    public function uniqueId(): string
+    {
+        return (string) $this->emailId;
+    }
+
     public function handle(EmailProviderFactory $providers): void
     {
-        $email = Email::query()->with(['source', 'recipients'])->findOrFail($this->emailId);
+        $email = Email::query()->with(['project', 'source', 'recipients'])->findOrFail($this->emailId);
 
         // 'sending' is allowed through so a retry can recover an email whose
         // previous attempt died mid-flight (worker crash, timeout).
         if (! in_array($email->status, ['queued', 'sending'], true)) {
+            return;
+        }
+
+        if ($email->project?->archived_at !== null) {
+            $email->forceFill(['status' => 'failed'])->save();
+            $email->events()->create([
+                'source_id' => $email->source_id,
+                'event_type' => 'failed',
+                'payload' => ['message' => 'Project was archived before this message could be sent.'],
+                'occurred_at' => now(),
+            ]);
+            EmailActivityUpdated::dispatch($email->fresh());
+
             return;
         }
 

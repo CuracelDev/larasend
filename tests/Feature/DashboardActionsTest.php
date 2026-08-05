@@ -525,6 +525,26 @@ it('creates and updates webhook endpoints with one-time signing secret reveal', 
         ->and($endpoint->status)->toBe('paused');
 });
 
+it('rejects webhook endpoints that can reach private networks', function (string $url) {
+    $user = User::factory()->create();
+    $project = app(ProjectContext::class)->projectFor($user);
+
+    $this->actingAs($user)
+        ->post("/projects/{$project->slug}/webhooks", [
+            'url' => $url,
+            'events' => ['delivery'],
+            'status' => 'active',
+        ])
+        ->assertSessionHasErrors('url');
+
+    expect($project->webhookEndpoints()->count())->toBe(0);
+})->with([
+    'localhost' => 'http://localhost/webhook',
+    'loopback' => 'http://127.0.0.1/webhook',
+    'cloud metadata' => 'http://169.254.169.254/latest/meta-data',
+    'private network' => 'http://10.0.0.5/webhook',
+]);
+
 it('forbids read-only workspace members from creating or updating webhook endpoints', function () {
     [$member, $project] = readOnlyMemberFixture();
 

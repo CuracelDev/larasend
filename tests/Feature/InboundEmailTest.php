@@ -7,8 +7,11 @@ use App\Models\Source;
 use App\Models\User;
 use App\Models\WebhookEndpoint;
 use App\Models\Workspace;
+use App\Services\InboundEmailIngestor;
+use Illuminate\Contracts\Bus\Dispatcher;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\Storage;
 
 function inboundProjectFixture(): array
 {
@@ -25,6 +28,14 @@ function inboundProjectFixture(): array
         'cloudflare_account_id' => 'acc-inbound',
         'default_from_email' => 'notifications@mail.example.com',
         'webhook_token' => 'inbound-token-'.str()->random(8),
+    ]);
+    $project->domains()->create([
+        'domain' => 'example.com',
+        'status' => 'verified',
+        'dns_records' => [],
+        'verified_at' => now(),
+        'inbound_enabled_at' => now(),
+        'inbound_domain' => 'example.com',
     ]);
 
     return [$user, $workspace, $project, $source];
@@ -81,6 +92,70 @@ it('ingests inbound email posted by the cloudflare worker', function () {
     Queue::assertPushed(DeliverInboundWebhook::class);
 });
 
+it('stores inbound mime on the configured shared disk', function () {
+    [, , , $source] = inboundProjectFixture();
+    config(['larasend.mime_disk' => 'shared-mail']);
+    Storage::fake('shared-mail');
+    Queue::fake();
+
+    $this->postJson("/api/webhooks/inbound/cloudflare/{$source->webhook_token}", [
+        'from' => 'maya@customer.test',
+        'to' => 'support@example.com',
+        'raw' => base64_encode(sampleInboundMime()),
+    ])->assertAccepted();
+
+    $inbound = InboundEmail::query()->firstOrFail();
+
+    expect($inbound->mime_disk)->toBe('shared-mail');
+    Storage::disk('shared-mail')->assertExists($inbound->mime_path);
+});
+
+it('keeps committed inbound mime when queue dispatch is temporarily unavailable', function () {
+    [, , , $source] = inboundProjectFixture();
+    config(['larasend.mime_disk' => 'shared-mail']);
+    Storage::fake('shared-mail');
+    $dispatcher = Mockery::mock(Dispatcher::class);
+    $dispatcher->shouldReceive('getCommandHandler')->andReturnNull();
+    $dispatcher->shouldReceive('dispatch')->andThrow(new RuntimeException('Queue unavailable.'));
+    $this->app->instance(Dispatcher::class, $dispatcher);
+    $mime = implode("\r\n", [
+        'From: Maya <maya@customer.test>',
+        'To: support@example.com',
+        'Subject: Durable inbound handoff',
+        'Message-ID: <durable-inbound@customer.test>',
+        '',
+        'Please keep this message.',
+    ]);
+
+    expect(fn () => app(InboundEmailIngestor::class)->ingest(
+        $source,
+        'maya@customer.test',
+        'support@example.com',
+        $mime,
+    ))->toThrow(RuntimeException::class, 'Queue unavailable.');
+
+    $inbound = InboundEmail::query()->where('subject', 'Durable inbound handoff')->firstOrFail();
+
+    Storage::disk('shared-mail')->assertExists($inbound->mime_path);
+});
+
+it('deduplicates repeated inbound deliveries', function () {
+    [, , , $source] = inboundProjectFixture();
+    Queue::fake();
+    $payload = [
+        'from' => 'maya@customer.test',
+        'to' => 'support@example.com',
+        'raw' => base64_encode(sampleInboundMime()),
+    ];
+
+    $first = $this->postJson("/api/webhooks/inbound/cloudflare/{$source->webhook_token}", $payload)->assertAccepted();
+    $second = $this->postJson("/api/webhooks/inbound/cloudflare/{$source->webhook_token}", $payload)->assertAccepted();
+
+    expect(InboundEmail::query()->count())->toBe(1)
+        ->and($second->json('id'))->toBe($first->json('id'));
+    Queue::assertPushed(DeliverInboundWebhook::class, 1);
+});
+
 it('rejects inbound posts with an unknown token or wrong provider', function () {
     [, , , $source] = inboundProjectFixture();
     $source->forceFill(['provider' => 'ses'])->save();
@@ -96,6 +171,19 @@ it('rejects inbound posts with an unknown token or wrong provider', function () 
         'to' => 'c@d.test',
         'raw' => base64_encode('hello'),
     ])->assertNotFound();
+
+    expect(InboundEmail::query()->count())->toBe(0);
+});
+
+it('rejects inbound mail addressed to a domain that is not enabled for the source', function () {
+    [, , , $source] = inboundProjectFixture();
+
+    $this->postJson("/api/webhooks/inbound/cloudflare/{$source->webhook_token}", [
+        'from' => 'maya@customer.test',
+        'to' => 'support@other-project.example',
+        'raw' => base64_encode(sampleInboundMime()),
+    ])->assertUnprocessable()
+        ->assertJsonPath('message', 'Recipient domain is not enabled for this source.');
 
     expect(InboundEmail::query()->count())->toBe(0);
 });

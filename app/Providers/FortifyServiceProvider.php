@@ -4,6 +4,7 @@ namespace App\Providers;
 
 use App\Actions\Fortify\CreateNewUser;
 use App\Actions\Fortify\ResetUserPassword;
+use App\Support\ControlMail;
 use App\Support\RegistrationAvailability;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
@@ -49,7 +50,8 @@ class FortifyServiceProvider extends ServiceProvider
     private function configureViews(): void
     {
         Fortify::loginView(fn (Request $request) => Inertia::render('auth/Login', [
-            'canResetPassword' => Features::enabled(Features::resetPasswords()),
+            'canResetPassword' => Features::enabled(Features::resetPasswords())
+                && app(ControlMail::class)->isConfigured(),
             'canRegister' => Features::enabled(Features::registration()) && RegistrationAvailability::isOpen(),
             'status' => $request->session()->get('status'),
         ]));
@@ -65,6 +67,7 @@ class FortifyServiceProvider extends ServiceProvider
 
         Fortify::verifyEmailView(fn (Request $request) => Inertia::render('auth/VerifyEmail', [
             'status' => $request->session()->get('status'),
+            'controlMailConfigured' => app(ControlMail::class)->isConfigured(),
         ]));
 
         Fortify::registerView(function () {

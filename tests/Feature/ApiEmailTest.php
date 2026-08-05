@@ -11,9 +11,12 @@ use App\Models\Workspace;
 use App\Services\EmailSendService;
 use App\Services\Providers\EmailProviderFactory;
 use App\Services\SesV2Client;
+use Illuminate\Contracts\Bus\Dispatcher;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 
 function larasendProjectFixture(): array
@@ -78,6 +81,155 @@ it('sends an email with api key auth and stores searchable content', function ()
         ->and($email->events()->where('event_type', 'send')->exists())->toBeFalse();
 
     Queue::assertPushed(SendQueuedEmail::class, fn (SendQueuedEmail $job) => $job->emailId === $email->id);
+});
+
+it('stores queued mime on the configured shared disk', function () {
+    [, , , $token] = larasendProjectFixture();
+    config(['larasend.mime_disk' => 'shared-mail']);
+    Storage::fake('shared-mail');
+    Queue::fake();
+
+    $this->withToken($token)->postJson('/api/emails', [
+        'from' => 'Larasend <receipts@example.com>',
+        'to' => ['maya@example.com'],
+        'subject' => 'Shared storage test',
+        'text' => 'The queue worker can read this MIME.',
+    ])->assertAccepted();
+
+    $email = Email::query()->firstOrFail();
+
+    expect($email->mime_disk)->toBe('shared-mail');
+    Storage::disk('shared-mail')->assertExists($email->mime_path);
+});
+
+it('keeps committed outbound mime when queue dispatch is temporarily unavailable', function () {
+    [, $project, $source] = larasendProjectFixture();
+    config(['larasend.mime_disk' => 'shared-mail']);
+    Storage::fake('shared-mail');
+    $dispatcher = Mockery::mock(Dispatcher::class);
+    $dispatcher->shouldReceive('getCommandHandler')->andReturnNull();
+    $dispatcher->shouldReceive('dispatchNow')->andReturnUsing(fn (object $command): object => $command);
+    $dispatcher->shouldReceive('dispatch')->andThrow(new RuntimeException('Queue unavailable.'));
+    $this->app->instance(Dispatcher::class, $dispatcher);
+
+    expect(fn () => app(EmailSendService::class)->send($project, $source, [
+        'from' => 'Larasend <receipts@example.com>',
+        'to' => ['maya@example.com'],
+        'subject' => 'Durable queue handoff',
+        'text' => 'Keep this MIME for retry.',
+    ]))->toThrow(RuntimeException::class, 'Queue unavailable.');
+
+    $email = Email::query()->where('subject', 'Durable queue handoff')->firstOrFail();
+
+    expect($email->status)->toBe('queued');
+    Storage::disk('shared-mail')->assertExists($email->mime_path);
+});
+
+it('replays idempotent sends without queueing a duplicate email', function () {
+    [, , , $token] = larasendProjectFixture();
+    Queue::fake();
+    $payload = [
+        'from' => 'Larasend <receipts@example.com>',
+        'to' => ['maya@example.com'],
+        'subject' => 'Idempotent receipt',
+        'text' => 'One message only.',
+    ];
+
+    $first = $this->withToken($token)
+        ->withHeader('Idempotency-Key', 'order-4821')
+        ->postJson('/api/emails', $payload)
+        ->assertAccepted();
+    $second = $this->withToken($token)
+        ->withHeader('Idempotency-Key', 'order-4821')
+        ->postJson('/api/emails', $payload)
+        ->assertAccepted()
+        ->assertJsonPath('replayed', true);
+
+    expect(Email::query()->count())->toBe(1)
+        ->and($second->json('id'))->toBe($first->json('id'));
+    Queue::assertPushed(SendQueuedEmail::class, 1);
+});
+
+it('rejects reusing an idempotency key with a different payload', function () {
+    [, , , $token] = larasendProjectFixture();
+    Queue::fake();
+    $request = $this->withToken($token)->withHeader('Idempotency-Key', 'order-4821');
+
+    $request->postJson('/api/emails', [
+        'from' => 'Larasend <receipts@example.com>',
+        'to' => ['maya@example.com'],
+        'subject' => 'Original',
+        'text' => 'Original body.',
+    ])->assertAccepted();
+
+    $this->withToken($token)
+        ->withHeader('Idempotency-Key', 'order-4821')
+        ->postJson('/api/emails', [
+            'from' => 'Larasend <receipts@example.com>',
+            'to' => ['maya@example.com'],
+            'subject' => 'Changed',
+            'text' => 'Changed body.',
+        ])
+        ->assertConflict();
+
+    expect(Email::query()->count())->toBe(1);
+});
+
+it('replays the winning email when concurrent idempotent inserts race', function () {
+    [$workspace, $project, $source, $token] = larasendProjectFixture();
+    Queue::fake();
+    $payload = [
+        'from' => 'Larasend <receipts@example.com>',
+        'to' => ['maya@example.com'],
+        'subject' => 'Concurrent receipt',
+        'text' => 'One message only.',
+    ];
+
+    $service = Mockery::mock(EmailSendService::class);
+    $service->shouldReceive('send')
+        ->once()
+        ->andReturnUsing(function (Project $sentProject, ?Source $sentSource, array $sentPayload, ?string $key, ?string $hash) use ($workspace): never {
+            Email::query()->create([
+                'public_id' => 'email_race_winner',
+                'idempotency_key' => $key,
+                'idempotency_hash' => $hash,
+                'workspace_id' => $workspace->id,
+                'project_id' => $sentProject->id,
+                'source_id' => $sentSource?->id,
+                'environment' => $sentSource?->environment ?? 'prod',
+                'status' => 'queued',
+                'from_email' => 'receipts@example.com',
+                'subject' => $sentPayload['subject'],
+            ]);
+
+            throw new QueryException(
+                'sqlite',
+                'insert into emails',
+                [],
+                new PDOException('UNIQUE constraint failed', 23000),
+            );
+        });
+    $this->app->instance(EmailSendService::class, $service);
+
+    $this->withToken($token)
+        ->withHeader('Idempotency-Key', 'concurrent-order')
+        ->postJson('/api/emails', $payload)
+        ->assertAccepted()
+        ->assertJsonPath('id', 'email_race_winner')
+        ->assertJsonPath('replayed', true);
+
+    expect(Email::query()->count())->toBe(1)
+        ->and($project)->toBeInstanceOf(Project::class)
+        ->and($source)->toBeInstanceOf(Source::class);
+});
+
+it('clamps api pagination to a safe positive range', function () {
+    [, , , $token] = larasendProjectFixture();
+
+    $this->withToken($token)
+        ->getJson('/api/emails?per_page=0')
+        ->assertSuccessful()
+        ->assertJsonPath('meta.per_page', 1);
 });
 
 it('refreshes stale ses quota before accepting api sends', function () {
@@ -366,6 +518,14 @@ it('rejects missing api keys', function () {
     $this->postJson('/api/emails', [])->assertUnauthorized();
 });
 
+it('applies the ip limiter before api key authentication', function () {
+    $this->withToken('invalid-key')
+        ->withServerVariables(['REMOTE_ADDR' => '198.51.100.77'])
+        ->getJson('/api/emails')
+        ->assertUnauthorized()
+        ->assertHeader('X-RateLimit-Limit', '180');
+});
+
 it('rejects expired api keys', function () {
     [, $project, $source] = larasendProjectFixture();
     $issued = ApiKey::issue($project, 'Expired key', $source, ['send', 'read:activity'], now()->subDay());
@@ -381,6 +541,15 @@ it('rejects api keys after they are deleted', function () {
     $issued['api_key']->delete();
 
     $this->withToken($issued['plain_text'])
+        ->getJson('/api/emails')
+        ->assertUnauthorized();
+});
+
+it('rejects api keys for archived projects', function () {
+    [, $project, , $plainText] = larasendProjectFixture();
+    $project->forceFill(['archived_at' => now()])->save();
+
+    $this->withToken($plainText)
         ->getJson('/api/emails')
         ->assertUnauthorized();
 });

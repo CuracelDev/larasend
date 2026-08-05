@@ -9,6 +9,7 @@ use App\Models\Source;
 use App\Models\Suppression;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\ConnectionInterface;
+use Illuminate\Support\Facades\DB;
 
 class SesEventNormalizer
 {
@@ -17,7 +18,7 @@ class SesEventNormalizer
     /**
      * @param  array<string, mixed>  $payload
      */
-    public function record(Source $source, array $payload): ?EmailEvent
+    public function record(Source $source, array $payload, ?string $providerMessageId = null): ?EmailEvent
     {
         $message = $payload['mail'] ?? [];
         $eventType = strtolower((string) ($payload['eventType'] ?? $payload['notificationType'] ?? 'unknown'));
@@ -27,24 +28,48 @@ class SesEventNormalizer
         $email = $sesMessageId
             ? Email::query()->where('source_id', $source->id)->where('ses_message_id', $sesMessageId)->first()
             : null;
+        $providerEventId = hash('sha256', $source->id.'|'.($providerMessageId ?: json_encode($payload, JSON_THROW_ON_ERROR)));
+        $existing = EmailEvent::query()->where('provider_event_id', $providerEventId)->first();
 
-        $email?->forceFill(['status' => $this->statusFor($eventType)])->save();
+        if ($existing) {
+            if ($existing->email) {
+                EmailActivityUpdated::dispatch($existing->email->fresh());
+            }
 
-        $event = EmailEvent::create([
-            'email_id' => $email?->id,
-            'source_id' => $source->id,
-            'event_type' => $eventType,
-            'ses_message_id' => $sesMessageId,
-            'recipient' => $recipient,
-            'url' => $detail['link'] ?? null,
-            'user_agent' => $detail['userAgent'] ?? null,
-            'ip_address' => $detail['ipAddress'] ?? null,
-            'payload' => $payload,
-            'occurred_at' => $this->occurredAt($message, $detail),
-        ]);
+            $this->webhookDeliveryService->dispatchFor($existing);
+
+            return $existing;
+        }
+
+        $nextStatus = $this->statusFor($eventType);
+
+        $event = DB::transaction(function () use ($email, $source, $eventType, $sesMessageId, $providerEventId, $recipient, $detail, $payload, $message, $nextStatus): EmailEvent {
+            if ($email && $this->statusPriority($nextStatus) >= $this->statusPriority($email->status)) {
+                $email->forceFill(['status' => $nextStatus])->save();
+            }
+
+            $event = EmailEvent::create([
+                'email_id' => $email?->id,
+                'source_id' => $source->id,
+                'event_type' => $eventType,
+                'ses_message_id' => $sesMessageId,
+                'provider_event_id' => $providerEventId,
+                'recipient' => $recipient,
+                'url' => $detail['link'] ?? null,
+                'user_agent' => $detail['userAgent'] ?? null,
+                'ip_address' => $detail['ipAddress'] ?? null,
+                'payload' => $payload,
+                'occurred_at' => $this->occurredAt($message, $detail),
+            ]);
+
+            if ($email) {
+                $this->recordSuppression($email, $eventType, $payload, $recipient);
+            }
+
+            return $event;
+        });
 
         if ($email) {
-            $this->recordSuppression($email, $eventType, $payload, $recipient);
             EmailActivityUpdated::dispatch($email->fresh());
         }
 
@@ -88,6 +113,21 @@ class SesEventNormalizer
             'deliverydelay' => 'delayed',
             'renderingfailure' => 'failed',
             default => 'sent',
+        };
+    }
+
+    private function statusPriority(string $status): int
+    {
+        return match ($status) {
+            'queued' => 0,
+            'sending' => 1,
+            'sent', 'delayed' => 2,
+            'delivered' => 3,
+            'opened' => 4,
+            'clicked' => 5,
+            'bounced', 'rejected', 'failed' => 6,
+            'complained' => 7,
+            default => 0,
         };
     }
 

@@ -4,9 +4,12 @@ namespace App\Providers;
 
 use App\Support\SystemHealth;
 use Carbon\CarbonImmutable;
+use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Date;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Validation\Rules\Password;
 
@@ -30,6 +33,8 @@ class AppServiceProvider extends ServiceProvider
         // Stamped on every worker poll loop so the dashboard can tell users
         // when no queue worker is running instead of leaving emails "queued".
         Queue::looping(fn () => app(SystemHealth::class)->recordWorkerHeartbeat());
+
+        RateLimiter::for('larasend-api-ip', fn (Request $request): Limit => Limit::perMinute(180)->by($request->ip()));
     }
 
     /**

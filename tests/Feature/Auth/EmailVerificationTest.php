@@ -8,6 +8,7 @@ use Laravel\Fortify\Features;
 
 beforeEach(function () {
     $this->skipUnlessFortifyHas(Features::emailVerification());
+    config(['larasend.control_mailer' => 'smtp']);
 });
 
 test('email verification screen can be rendered', function () {
@@ -16,6 +17,14 @@ test('email verification screen can be rendered', function () {
     $response = $this->actingAs($user)->get(route('verification.notice'));
 
     $response->assertOk();
+});
+
+test('unverified users cannot access protected application routes', function () {
+    $user = User::factory()->unverified()->create();
+
+    $this->actingAs($user)
+        ->get(route('dashboard'))
+        ->assertRedirect(route('verification.notice'));
 });
 
 test('email can be verified', function () {

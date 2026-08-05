@@ -130,6 +130,49 @@ it('normalizes ses delivery events', function () {
         ->and($email->events()->where('event_type', 'delivery')->exists())->toBeTrue();
 });
 
+it('deduplicates repeated sns notifications by message id', function () {
+    [$source, $email] = sesWebhookFixture();
+    Http::fake([SES_TEST_SIGNING_CERT_URL => Http::response(sesTestPublicCertificate())]);
+    $message = [
+        'eventType' => 'Delivery',
+        'mail' => ['messageId' => 'ses-1', 'timestamp' => now()->toIso8601String(), 'destination' => ['maya@example.com']],
+        'delivery' => ['recipients' => ['maya@example.com'], 'timestamp' => now()->toIso8601String()],
+    ];
+    $envelope = sesSignedSnsEnvelope('Notification', ['Message' => json_encode($message)]);
+
+    $this->postJson("/api/webhooks/ses/{$source->webhook_token}", $envelope)->assertSuccessful();
+    $this->postJson("/api/webhooks/ses/{$source->webhook_token}", $envelope)->assertSuccessful();
+
+    expect($email->events()->where('event_type', 'delivery')->count())->toBe(1);
+});
+
+it('does not regress an advanced email status when an older event arrives late', function () {
+    [$source, $email] = sesWebhookFixture();
+    Http::fake([SES_TEST_SIGNING_CERT_URL => Http::response(sesTestPublicCertificate())]);
+    $click = [
+        'eventType' => 'Click',
+        'mail' => ['messageId' => 'ses-1', 'timestamp' => now()->toIso8601String(), 'destination' => ['maya@example.com']],
+        'click' => ['link' => 'https://example.com', 'timestamp' => now()->toIso8601String()],
+    ];
+    $delivery = [
+        'eventType' => 'Delivery',
+        'mail' => ['messageId' => 'ses-1', 'timestamp' => now()->subMinute()->toIso8601String(), 'destination' => ['maya@example.com']],
+        'delivery' => ['recipients' => ['maya@example.com'], 'timestamp' => now()->subMinute()->toIso8601String()],
+    ];
+
+    $this->postJson(
+        "/api/webhooks/ses/{$source->webhook_token}",
+        sesSignedSnsEnvelope('Notification', ['Message' => json_encode($click)]),
+    )->assertSuccessful();
+    $this->postJson(
+        "/api/webhooks/ses/{$source->webhook_token}",
+        sesSignedSnsEnvelope('Notification', ['Message' => json_encode($delivery)]),
+    )->assertSuccessful();
+
+    expect($email->fresh()->status)->toBe('clicked')
+        ->and($email->events()->pluck('event_type')->all())->toContain('click', 'delivery');
+});
+
 it('records suppressions for permanent ses bounces and complaints', function () {
     [$source, $email] = sesWebhookFixture();
 

@@ -7,6 +7,7 @@ use App\Models\Source;
 use App\Services\CloudflareApiClient;
 use App\Services\DnsRecordVerifier;
 use Illuminate\Support\Facades\File;
+use Illuminate\Support\Str;
 use RuntimeException;
 use Throwable;
 
@@ -19,8 +20,6 @@ use Throwable;
  */
 class CloudflareInboundProvisioner
 {
-    public const WORKER_NAME = 'larasend-inbound';
-
     /**
      * The MX records Cloudflare Email Routing expects at the zone apex.
      */
@@ -45,8 +44,22 @@ class CloudflareInboundProvisioner
             );
         }
 
+        $zoneOwnerExists = Domain::query()
+            ->where('inbound_domain', Str::lower($zone['name']))
+            ->whereNotNull('inbound_enabled_at')
+            ->where('project_id', '!=', $source->project_id)
+            ->exists();
+
+        if ($zoneOwnerExists) {
+            throw new RuntimeException(
+                "Cloudflare Email Routing has one catch-all per zone. {$zone['name']} is already connected to another Larasend project.",
+            );
+        }
+
+        $workerName = $this->workerName($source);
+
         try {
-            $this->apiClient->uploadWorker($source, self::WORKER_NAME, $this->workerCode(), [
+            $this->apiClient->uploadWorker($source, $workerName, $this->workerCode(), [
                 'LARASEND_INBOUND_URL' => route('webhooks.inbound.cloudflare', $source->webhook_token),
             ]);
         } catch (Throwable $exception) {
@@ -58,11 +71,11 @@ class CloudflareInboundProvisioner
         }
 
         try {
-            $this->apiClient->routeCatchAllToWorker($source, $zone['id'], self::WORKER_NAME);
+            $this->apiClient->routeCatchAllToWorker($source, $zone['id'], $workerName);
         } catch (Throwable $exception) {
             throw new RuntimeException(
                 'Deployed the Worker but could not configure Email Routing: '.$exception->getMessage()
-                    .' Add the "Email Routing Rules: Edit" permission to the API token, or point a routing rule at the "'.self::WORKER_NAME.'" Worker in the Cloudflare dashboard.',
+                    .' Add the "Email Routing Rules: Edit" permission to the API token, or point a routing rule at the "'.$workerName.'" Worker in the Cloudflare dashboard.',
                 previous: $exception,
             );
         }
@@ -78,7 +91,10 @@ class CloudflareInboundProvisioner
             report($exception);
         }
 
-        $domain->forceFill(['inbound_enabled_at' => now()])->save();
+        $domain->forceFill([
+            'inbound_enabled_at' => now(),
+            'inbound_domain' => Str::lower($zone['name']),
+        ])->save();
     }
 
     /**
@@ -131,5 +147,10 @@ class CloudflareInboundProvisioner
     public function workerCode(): string
     {
         return File::get(resource_path('cloudflare/inbound-email-worker.js'));
+    }
+
+    public function workerName(Source $source): string
+    {
+        return 'larasend-inbound-'.substr(hash('sha256', $source->webhook_token), 0, 16);
     }
 }

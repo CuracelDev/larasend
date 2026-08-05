@@ -6,15 +6,20 @@ use App\Http\Requests\StoreWorkspaceMemberRequest;
 use App\Http\Requests\UpdateWorkspaceMemberRequest;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Support\ControlMail;
 use App\Support\ProjectContext;
+use Illuminate\Auth\Events\Registered;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 
 class WorkspaceMemberController extends Controller
 {
+    public function __construct(private ControlMail $controlMail) {}
+
     public function store(StoreWorkspaceMemberRequest $request, ProjectContext $context): RedirectResponse
     {
         $workspace = $this->manageableWorkspace($request, $context);
@@ -25,11 +30,19 @@ class WorkspaceMemberController extends Controller
         $created = false;
 
         if (! $member) {
-            $member = User::query()->create([
+            if (! $this->controlMail->isConfigured()) {
+                throw ValidationException::withMessages([
+                    'email' => 'Configure a dedicated control email mailer before inviting a new user.',
+                ]);
+            }
+
+            $member = new User;
+            $member->fill([
                 'name' => $this->nameFromEmail($validated['email']),
                 'email' => $validated['email'],
                 'password' => Str::password(32),
             ]);
+            $member->forceFill($this->controlMail->verificationAttributes())->save();
             $created = true;
         }
 
@@ -38,6 +51,7 @@ class WorkspaceMemberController extends Controller
         ]);
 
         if ($created) {
+            event(new Registered($member));
             Password::broker()->sendResetLink(['email' => $member->email]);
         }
 

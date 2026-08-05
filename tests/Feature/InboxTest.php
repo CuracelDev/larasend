@@ -24,6 +24,14 @@ function inboxFixture(): array
         'default_from_email' => 'support@example.com',
         'webhook_token' => 'inbox-token-'.str()->random(8),
     ]);
+    $project->domains()->create([
+        'domain' => 'example.com',
+        'status' => 'verified',
+        'dns_records' => [],
+        'verified_at' => now(),
+        'inbound_enabled_at' => now(),
+        'inbound_domain' => 'example.com',
+    ]);
 
     return [$user, $project, $source];
 }

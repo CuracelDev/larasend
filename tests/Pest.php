@@ -1,5 +1,6 @@
 <?php
 
+use App\Services\WebhookUrlGuard;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Tests\TestCase;
@@ -19,6 +20,13 @@ pest()->extend(TestCase::class)
     ->use(RefreshDatabase::class)
     ->beforeEach(function (): void {
         $this->withoutVite();
+        $this->app->bind(WebhookUrlGuard::class, fn () => new class extends WebhookUrlGuard
+        {
+            protected function resolveHost(string $host): array
+            {
+                return ['93.184.216.34'];
+            }
+        });
     })
     ->in('Feature');
 

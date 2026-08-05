@@ -4,7 +4,9 @@ use App\Models\Project;
 use App\Models\Source;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Notifications\ControlEmailVerification;
 use App\Support\ProjectContext;
+use Illuminate\Support\Facades\Notification;
 
 test('profile page is displayed', function () {
     $user = User::factory()->create();
@@ -65,7 +67,28 @@ test('profile information can be updated', function () {
 
     expect($user->name)->toBe('Test User');
     expect($user->email)->toBe('test@example.com');
-    expect($user->email_verified_at)->toBeNull();
+    expect($user->email_verified_at)->not->toBeNull();
+    expect($user->email_verification_required_at)->toBeNull();
+});
+
+test('email changes require verification only when control mail is configured', function () {
+    Notification::fake();
+    config(['larasend.control_mailer' => 'smtp']);
+    $user = User::factory()->create();
+
+    $this->actingAs($user)
+        ->patch(route('profile.update'), [
+            'name' => 'Test User',
+            'email' => 'new-address@example.com',
+        ])
+        ->assertSessionHasNoErrors()
+        ->assertRedirect(route('profile.edit'));
+
+    $user->refresh();
+
+    expect($user->email_verified_at)->toBeNull()
+        ->and($user->email_verification_required_at)->not->toBeNull();
+    Notification::assertSentTo($user, ControlEmailVerification::class);
 });
 
 test('email verification status is unchanged when the email address is unchanged', function () {
@@ -117,4 +140,17 @@ test('correct password must be provided to delete account', function () {
         ->assertRedirect(route('profile.edit'));
 
     expect($user->fresh())->not->toBeNull();
+});
+
+test('workspace owners must transfer or delete their workspace before deleting their account', function () {
+    $user = User::factory()->create();
+    $workspace = app(ProjectContext::class)->workspaceFor($user);
+
+    $this->actingAs($user)
+        ->delete(route('profile.destroy'), ['password' => 'password'])
+        ->assertSessionHasErrors('password');
+
+    expect($user->fresh())->not->toBeNull()
+        ->and($workspace->fresh())->not->toBeNull();
+    $this->assertAuthenticatedAs($user);
 });

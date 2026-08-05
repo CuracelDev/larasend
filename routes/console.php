@@ -1,5 +1,6 @@
 <?php
 
+use App\Jobs\PruneExpiredEmailData;
 use App\Jobs\RecheckPendingDomains;
 use App\Jobs\SyncCloudflareSuppressions;
 use App\Jobs\SyncStaleSourceQuotas;
@@ -14,7 +15,9 @@ Artisan::command('inspire', function () {
 
 Schedule::call(fn () => app(SystemHealth::class)->recordSchedulerHeartbeat())
     ->everyMinute()
-    ->name('scheduler-heartbeat');
-Schedule::job(new SyncCloudflareSuppressions)->hourly()->withoutOverlapping();
-Schedule::job(new RecheckPendingDomains)->everyTenMinutes()->withoutOverlapping();
-Schedule::job(new SyncStaleSourceQuotas)->everyThirtyMinutes()->withoutOverlapping();
+    ->name('scheduler-heartbeat')
+    ->onOneServer();
+Schedule::job(new SyncCloudflareSuppressions)->hourly()->withoutOverlapping()->onOneServer();
+Schedule::job(new RecheckPendingDomains)->everyTenMinutes()->withoutOverlapping()->onOneServer();
+Schedule::job(new SyncStaleSourceQuotas)->everyThirtyMinutes()->withoutOverlapping()->onOneServer();
+Schedule::job(new PruneExpiredEmailData)->dailyAt('02:30')->withoutOverlapping()->onOneServer();

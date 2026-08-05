@@ -11,18 +11,28 @@ services:
       - "${LARASEND_HTTP_PORT:-8080}:8080"
     volumes:
       - larasend-storage:/var/www/html/storage
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/up"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
 
   queue:
     image: ${LARASEND_IMAGE:-ghcr.io/savvyagents/larasend:latest}
-    command: php artisan queue:work --queue=default,webhooks --tries=3 --timeout=90
+    command: php artisan queue:work --queue=default,webhooks --tries=3 --timeout=150
     env_file: .env
     environment:
       LARASEND_RUN_MIGRATIONS: "false"
     depends_on:
-      - app
-      - redis
+      app:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - larasend-storage:/var/www/html/storage
+    restart: unless-stopped
 
   scheduler:
     image: ${LARASEND_IMAGE:-ghcr.io/savvyagents/larasend:latest}
@@ -31,10 +41,13 @@ services:
     environment:
       LARASEND_RUN_MIGRATIONS: "false"
     depends_on:
-      - app
-      - redis
+      app:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - larasend-storage:/var/www/html/storage
+    restart: unless-stopped
 
   postgres:
     image: postgres:17-alpine
@@ -52,6 +65,11 @@ services:
 
   redis:
     image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
 
 volumes:
   larasend-postgres:

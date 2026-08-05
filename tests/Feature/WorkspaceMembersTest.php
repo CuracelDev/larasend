@@ -4,7 +4,8 @@ use App\Models\Project;
 use App\Models\Source;
 use App\Models\User;
 use App\Models\Workspace;
-use Illuminate\Auth\Notifications\ResetPassword;
+use App\Notifications\ControlEmailVerification;
+use App\Notifications\ControlPasswordReset;
 use Illuminate\Support\Facades\Notification;
 
 function workspaceMembersFixture(): array
@@ -52,6 +53,7 @@ it('allows workspace owners to add an existing user as a member', function () {
 
 it('creates a user and sends a setup link when adding a new email', function () {
     Notification::fake();
+    config(['larasend.control_mailer' => 'smtp']);
 
     [$owner, $workspace] = workspaceMembersFixture();
 
@@ -68,7 +70,23 @@ it('creates a user and sends a setup link when adding a new email', function () 
         ->and($workspace->users()->whereKey($member->id)->first()?->pivot->role)
         ->toBe('member');
 
-    Notification::assertSentTo($member, ResetPassword::class);
+    expect($member->email_verification_required_at)->not->toBeNull();
+    Notification::assertSentTo($member, ControlEmailVerification::class);
+    Notification::assertSentTo($member, ControlPasswordReset::class);
+});
+
+it('blocks invitations that would create an unreachable user without control mail', function () {
+    [$owner, $workspace] = workspaceMembersFixture();
+
+    $this->actingAs($owner)
+        ->post('/workspace/members', [
+            'email' => 'unreachable@example.com',
+            'role' => 'member',
+        ])
+        ->assertSessionHasErrors('email');
+
+    expect(User::query()->where('email', 'unreachable@example.com')->exists())->toBeFalse()
+        ->and($workspace->users()->where('email', 'unreachable@example.com')->exists())->toBeFalse();
 });
 
 it('shows workspace members on the projects screen', function () {

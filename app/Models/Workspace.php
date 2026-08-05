@@ -16,8 +16,8 @@ class Workspace extends Model
      * @var array<string, array<int, string>>
      */
     public const ROLE_CAPABILITIES = [
-        'owner' => ['send', 'manage_api_keys', 'manage_domains', 'manage_templates', 'manage_webhooks', 'manage_suppressions', 'manage_members'],
-        'member' => ['send', 'manage_api_keys', 'manage_domains', 'manage_templates', 'manage_webhooks', 'manage_suppressions'],
+        'owner' => ['send', 'manage_api_keys', 'manage_domains', 'manage_templates', 'manage_webhooks', 'manage_suppressions', 'manage_members', 'manage_projects', 'manage_inbox'],
+        'member' => ['send', 'manage_api_keys', 'manage_domains', 'manage_templates', 'manage_webhooks', 'manage_suppressions', 'manage_projects', 'manage_inbox'],
         'sender' => ['send'],
         'api_keys' => ['manage_api_keys'],
         'domains' => ['manage_domains'],
@@ -106,6 +106,16 @@ class Workspace extends Model
     public function canManageSuppressions(User $user): bool
     {
         return $this->roleAllows($user, 'manage_suppressions');
+    }
+
+    public function canManageProjects(User $user): bool
+    {
+        return $this->roleAllows($user, 'manage_projects');
+    }
+
+    public function canManageInbox(User $user): bool
+    {
+        return $this->roleAllows($user, 'manage_inbox');
     }
 
     private function roleAllows(User $user, string $capability): bool

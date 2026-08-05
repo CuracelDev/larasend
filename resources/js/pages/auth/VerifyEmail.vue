@@ -9,13 +9,13 @@ import { send } from '@/routes/verification';
 defineOptions({
     layout: {
         title: 'Verify email',
-        description:
-            'Please verify your email address by clicking on the link we just emailed to you.',
+        description: 'Verify your email address before continuing to Larasend.',
     },
 });
 
 defineProps<{
     status?: string;
+    controlMailConfigured: boolean;
 }>();
 </script>
 
@@ -30,7 +30,16 @@ defineProps<{
         during registration.
     </div>
 
+    <div
+        v-if="!controlMailConfigured"
+        class="mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-center text-sm text-amber-700 dark:text-amber-300"
+    >
+        Control email is unavailable. Ask the server administrator to run
+        <code>php artisan larasend:verify-user your@email.com --force</code>.
+    </div>
+
     <Form
+        v-if="controlMailConfigured"
         v-bind="send.form()"
         class="space-y-6 text-center"
         v-slot="{ processing }"

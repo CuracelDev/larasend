@@ -6,10 +6,13 @@ use App\Models\Project;
 use App\Models\Source;
 use App\Models\User;
 use App\Models\WebhookDelivery;
+use App\Support\ControlMail;
 use Carbon\CarbonInterface;
 
 class BuildProjectDashboard
 {
+    public function __construct(private ControlMail $controlMail) {}
+
     /**
      * @param  array{worker_alive: bool, worker_last_seen: ?string, scheduler_alive: bool, scheduler_last_seen: ?string, stuck_queued: int}  $system
      * @param  array{sent: int, limit: ?int, rate: ?int, sentLast24Hours: ?int, checkedAt: ?string}  $quota
@@ -107,7 +110,11 @@ class BuildProjectDashboard
 
         return [
             ...$summary,
-            'attention' => $this->attention($summary, $system),
+            'attention' => $this->attention(
+                $summary,
+                $system,
+                $project->workspace->canManageMembers($user),
+            ),
         ];
     }
 
@@ -168,7 +175,7 @@ class BuildProjectDashboard
      * @param  array<string, mixed>  $system
      * @return array<int, array{key: string, label: string, description: string, count: int, section: string, tone: string}>
      */
-    private function attention(array $summary, array $system): array
+    private function attention(array $summary, array $system, bool $canManageWorkspace): array
     {
         $items = [
             ['key' => 'failed', 'label' => 'Failed sends', 'description' => 'Messages that need investigation or a retry.', 'count' => $summary['outbound']['failed'], 'section' => 'outbound', 'tone' => 'danger'],
@@ -185,6 +192,17 @@ class BuildProjectDashboard
 
         if (! $system['scheduler_alive']) {
             $items[] = ['key' => 'scheduler', 'label' => 'Scheduler not detected', 'description' => 'Quota and suppression syncs may be delayed.', 'count' => 1, 'section' => 'source', 'tone' => 'warning'];
+        }
+
+        if ($canManageWorkspace && ! $this->controlMail->isConfigured()) {
+            $items[] = [
+                'key' => 'control-mail',
+                'label' => 'Control email is not configured',
+                'description' => 'Password recovery, invitations, and new-account verification stay disabled until LARASEND_CONTROL_MAILER is set.',
+                'count' => 1,
+                'section' => 'projects',
+                'tone' => 'warning',
+            ];
         }
 
         return collect($items)->filter(fn (array $item): bool => $item['count'] > 0)->values()->all();

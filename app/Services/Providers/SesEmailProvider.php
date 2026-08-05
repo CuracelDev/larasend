@@ -19,8 +19,8 @@ class SesEmailProvider implements EmailProvider
 
     public function hasSendingCredentials(Source $source): bool
     {
-        // Production falls back to the EC2 instance role inside SesV2Client.
-        return filled($source->aws_access_key_id) || app()->environment('production');
+        return (filled($source->aws_access_key_id) && filled($source->aws_secret_access_key))
+            || $this->sesClient->hasInstanceRoleCredentials();
     }
 
     public function validateCredentials(Source $source): array

@@ -24,7 +24,14 @@ import {
     History,
     X,
 } from 'lucide-vue-next';
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import {
+    computed,
+    nextTick,
+    onBeforeUnmount,
+    onMounted,
+    ref,
+    watch,
+} from 'vue';
 import GlobalRail from '@/components/GlobalRail.vue';
 import RichTextEditor from '@/components/RichTextEditor.vue';
 import { Toaster } from '@/components/ui/sonner';
@@ -131,6 +138,9 @@ const searchQuery = ref(props.filters.q);
 const searchInput = ref<HTMLInputElement | null>(null);
 const mobileThreadOpen = ref(false);
 const showFilters = ref(false);
+const showCompose = ref(false);
+const showForward = ref(false);
+const showShortcuts = ref(false);
 const bulkMode = ref(false);
 const selectedThreadIds = ref<string[]>([]);
 const showActivity = ref(false);
@@ -202,7 +212,7 @@ function visitInbox(params: Record<string, string | null>): void {
 }
 
 function openMailbox(key: string): void {
-    visitInbox({ mailbox: key, address: null, thread: null });
+    visitInbox({ mailbox: key, thread: null });
 }
 
 function filterAddress(address: string): void {
@@ -219,7 +229,7 @@ function setAssignmentFilter(assigned: string | null): void {
 
 function setAddressFilter(address: string | null): void {
     visitInbox({
-        mailbox: address ? 'all' : 'inbox',
+        mailbox: props.mailbox,
         address,
         thread: null,
     });
@@ -227,7 +237,7 @@ function setAddressFilter(address: string | null): void {
 
 function clearFilters(): void {
     visitInbox({
-        mailbox: props.address ? 'inbox' : props.mailbox,
+        mailbox: props.mailbox,
         address: null,
         assigned: null,
         thread: null,
@@ -392,24 +402,106 @@ function moveSelection(step: number): void {
     }
 }
 
+const hasOpenOverlay = computed(
+    () =>
+        showFilters.value ||
+        showCompose.value ||
+        showForward.value ||
+        showActivity.value ||
+        showShortcuts.value,
+);
+
+let overlayTrigger: HTMLElement | null = null;
+let previousBodyOverflow = '';
+let bodyScrollLocked = false;
+
+function activeDialog(): HTMLElement | null {
+    return document.querySelector<HTMLElement>('[data-inbox-dialog]');
+}
+
+function closeActiveOverlay(): boolean {
+    if (showActivity.value) {
+        showActivity.value = false;
+    } else if (showForward.value) {
+        showForward.value = false;
+    } else if (showCompose.value) {
+        showCompose.value = false;
+    } else if (showFilters.value) {
+        showFilters.value = false;
+    } else if (showShortcuts.value) {
+        showShortcuts.value = false;
+    } else {
+        return false;
+    }
+
+    return true;
+}
+
+function trapDialogFocus(event: KeyboardEvent): void {
+    const dialog = activeDialog();
+
+    if (!dialog) {
+        return;
+    }
+
+    const focusableElements = Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+            'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+    ).filter((element) => !element.hasAttribute('hidden'));
+
+    if (!focusableElements.length) {
+        event.preventDefault();
+        dialog.focus();
+
+        return;
+    }
+
+    const first = focusableElements[0];
+    const last = focusableElements[focusableElements.length - 1];
+
+    if (!dialog.contains(document.activeElement)) {
+        event.preventDefault();
+        first.focus();
+    } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+    }
+}
+
 function onKeydown(event: KeyboardEvent): void {
     const target = event.target as HTMLElement | null;
 
-    if (
-        target &&
-        (target.tagName === 'INPUT' ||
-            target.tagName === 'TEXTAREA' ||
-            target.isContentEditable)
-    ) {
-        if (event.key === 'Escape') {
-            (target as HTMLInputElement).blur();
+    if (event.key === 'Escape' && closeActiveOverlay()) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        return;
+    }
+
+    if (hasOpenOverlay.value) {
+        if (event.key === 'Tab') {
+            trapDialogFocus(event);
         }
 
         return;
     }
 
-    if (event.key === 'Escape' && showShortcuts.value) {
-        showShortcuts.value = false;
+    if (event.metaKey || event.ctrlKey || event.altKey) {
+        return;
+    }
+
+    const interactiveTarget = target?.closest<HTMLElement>(
+        'input, textarea, select, button, a, [contenteditable]:not([contenteditable="false"]), [role="dialog"], [role="menu"], [role="listbox"]',
+    );
+
+    if (interactiveTarget) {
+        if (event.key === 'Escape' && interactiveTarget.isContentEditable) {
+            interactiveTarget.blur();
+        }
 
         return;
     }
@@ -475,6 +567,33 @@ onMounted(() => {
 onBeforeUnmount(() => {
     themeObserver?.disconnect();
     window.removeEventListener('keydown', onKeydown);
+
+    if (bodyScrollLocked) {
+        document.body.style.overflow = previousBodyOverflow;
+    }
+});
+
+watch(hasOpenOverlay, async (open, wasOpen) => {
+    if (open && !wasOpen) {
+        overlayTrigger = document.activeElement as HTMLElement | null;
+        previousBodyOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        bodyScrollLocked = true;
+
+        await nextTick();
+
+        const dialog = activeDialog();
+        const initialFocus = dialog?.querySelector<HTMLElement>(
+            '[data-dialog-initial-focus]',
+        );
+
+        (initialFocus ?? dialog)?.focus();
+    } else if (!open && wasOpen) {
+        document.body.style.overflow = previousBodyOverflow;
+        bodyScrollLocked = false;
+        overlayTrigger?.focus();
+        overlayTrigger = null;
+    }
 });
 
 usePoll(
@@ -530,7 +649,6 @@ function sendReply(): void {
     });
 }
 
-const showShortcuts = ref(false);
 const shortcuts = [
     ['j / k', 'Next / previous conversation'],
     ['e', 'Archive or restore'],
@@ -543,7 +661,6 @@ const shortcuts = [
     ['?', 'Show these shortcuts'],
 ];
 
-const showCompose = ref(false);
 const composeForm = useForm({
     from: '',
     to: '',
@@ -579,7 +696,6 @@ function applyTemplate(templateId: string): void {
     composeForm.text = template.text ?? '';
 }
 
-const showForward = ref(false);
 const forwardForm = useForm({ to: '', text: '' });
 
 function sendForward(): void {
@@ -648,23 +764,42 @@ function onNoteKeydown(event: KeyboardEvent): void {
 
 // --- Attachments -----------------------------------------------------------
 
-type AttachableForm = { attachments: File[] };
+type AttachableForm = {
+    attachments: File[];
+    clearErrors: (field: 'attachments') => unknown;
+    setError: (field: 'attachments', value: string) => unknown;
+};
 
 function pickFiles(form: AttachableForm): void {
     const input = document.createElement('input');
     input.type = 'file';
     input.multiple = true;
     input.onchange = () => {
+        const selectedFiles = Array.from(input.files ?? []);
+        const availableSlots = Math.max(0, 10 - form.attachments.length);
+
+        if (selectedFiles.length > availableSlots) {
+            const ignoredFiles = selectedFiles.length - availableSlots;
+
+            form.setError(
+                'attachments',
+                `You can attach up to 10 files. ${ignoredFiles} ${ignoredFiles === 1 ? 'file was' : 'files were'} not added.`,
+            );
+        } else {
+            form.clearErrors('attachments');
+        }
+
         form.attachments = [
             ...form.attachments,
-            ...Array.from(input.files ?? []),
-        ].slice(0, 10);
+            ...selectedFiles.slice(0, availableSlots),
+        ];
     };
     input.click();
 }
 
 function removeFile(form: AttachableForm, index: number): void {
     form.attachments = form.attachments.filter((_, i) => i !== index);
+    form.clearErrors('attachments');
 }
 
 function fileSize(file: File): string {
@@ -909,7 +1044,7 @@ function participantSummary(thread: ThreadRow): string {
                         type="button"
                         class="flex h-7 items-center gap-2.5 rounded-md px-2 text-left font-medium transition hover:bg-zinc-100 dark:hover:bg-[#16191c]"
                         :class="
-                            mailbox === box.key && !address
+                            mailbox === box.key
                                 ? 'bg-teal-50 text-zinc-950 dark:bg-teal-400/10 dark:text-zinc-100'
                                 : 'text-zinc-600 dark:text-zinc-400'
                         "
@@ -1804,6 +1939,7 @@ function participantSummary(thread: ThreadRow): string {
                                     <button
                                         type="button"
                                         class="text-zinc-400 hover:text-red-500"
+                                        :aria-label="`Remove ${file.name}`"
                                         @click="removeFile(replyForm, index)"
                                     >
                                         <X class="size-3" />
@@ -1841,6 +1977,7 @@ function participantSummary(thread: ThreadRow): string {
                                         replyForm.errors.attachments
                                     "
                                     class="text-xs text-red-500"
+                                    role="alert"
                                 >
                                     {{
                                         replyForm.errors.text ||
@@ -1902,11 +2039,19 @@ function participantSummary(thread: ThreadRow): string {
             @click.self="showFilters = false"
         >
             <aside
+                data-inbox-dialog
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="inbox-filters-title"
+                tabindex="-1"
                 class="grid h-full w-72 content-start gap-1 overflow-y-auto bg-white p-4 shadow-2xl dark:bg-[#111315]"
             >
                 <div class="mb-3 flex items-center">
-                    <h2 class="font-semibold">Mailbox filters</h2>
+                    <h2 id="inbox-filters-title" class="font-semibold">
+                        Mailbox filters
+                    </h2>
                     <button
+                        data-dialog-initial-focus
                         type="button"
                         class="ml-auto p-2"
                         aria-label="Close filters"
@@ -1921,7 +2066,7 @@ function participantSummary(thread: ThreadRow): string {
                     type="button"
                     class="flex min-h-10 items-center gap-2 rounded-lg px-3 text-left"
                     :class="
-                        mailbox === box.key && !address
+                        mailbox === box.key
                             ? 'bg-teal-50 dark:bg-teal-400/10'
                             : ''
                     "
@@ -1996,14 +2141,22 @@ function participantSummary(thread: ThreadRow): string {
             @click.self="showCompose = false"
         >
             <form
+                data-inbox-dialog
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="inbox-compose-title"
+                tabindex="-1"
                 class="grid w-full max-w-xl gap-3 rounded-xl border border-zinc-200 bg-white p-5 shadow-xl dark:border-[#1d2125] dark:bg-[#111315]"
                 @submit.prevent="sendCompose"
             >
                 <div class="flex items-center">
-                    <h2 class="font-semibold">New conversation</h2>
+                    <h2 id="inbox-compose-title" class="font-semibold">
+                        New conversation
+                    </h2>
                     <button
                         type="button"
                         class="ml-auto rounded p-1 text-zinc-500 hover:text-zinc-950 dark:hover:text-zinc-100"
+                        aria-label="Close new conversation"
                         @click="showCompose = false"
                     >
                         <X class="size-4" />
@@ -2028,6 +2181,7 @@ function participantSummary(thread: ThreadRow): string {
                 <label class="grid gap-1.5 text-sm">
                     <span class="text-zinc-500">To</span>
                     <input
+                        data-dialog-initial-focus
                         v-model="composeForm.to"
                         type="text"
                         required
@@ -2037,6 +2191,7 @@ function participantSummary(thread: ThreadRow): string {
                     <span
                         v-if="composeForm.errors.to"
                         class="text-xs text-red-500"
+                        role="alert"
                     >
                         {{ composeForm.errors.to }}
                     </span>
@@ -2113,6 +2268,7 @@ function participantSummary(thread: ThreadRow): string {
                         <button
                             type="button"
                             class="text-zinc-400 hover:text-red-500"
+                            :aria-label="`Remove ${file.name}`"
                             @click="removeFile(composeForm, index)"
                         >
                             <X class="size-3" />
@@ -2146,6 +2302,7 @@ function participantSummary(thread: ThreadRow): string {
                             composeForm.errors.attachments
                         "
                         class="text-xs text-red-500"
+                        role="alert"
                     >
                         {{
                             composeForm.errors.text ||
@@ -2163,14 +2320,22 @@ function participantSummary(thread: ThreadRow): string {
             @click.self="showForward = false"
         >
             <form
+                data-inbox-dialog
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="inbox-forward-title"
+                tabindex="-1"
                 class="grid w-full max-w-xl gap-3 rounded-xl border border-zinc-200 bg-white p-5 shadow-xl dark:border-[#1d2125] dark:bg-[#111315]"
                 @submit.prevent="sendForward"
             >
                 <div class="flex items-center">
-                    <h2 class="font-semibold">Forward conversation</h2>
+                    <h2 id="inbox-forward-title" class="font-semibold">
+                        Forward conversation
+                    </h2>
                     <button
                         type="button"
                         class="ml-auto rounded p-1 text-zinc-500 hover:text-zinc-950 dark:hover:text-zinc-100"
+                        aria-label="Close forward conversation"
                         @click="showForward = false"
                     >
                         <X class="size-4" />
@@ -2184,6 +2349,7 @@ function participantSummary(thread: ThreadRow): string {
                 <label class="grid gap-1.5 text-sm">
                     <span class="text-zinc-500">To</span>
                     <input
+                        data-dialog-initial-focus
                         v-model="forwardForm.to"
                         type="email"
                         required
@@ -2225,18 +2391,26 @@ function participantSummary(thread: ThreadRow): string {
         @click.self="showActivity = false"
     >
         <section
+            data-inbox-dialog
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="inbox-activity-title"
+            tabindex="-1"
             class="grid max-h-[80vh] w-full max-w-lg grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-2xl dark:border-[#1d2125] dark:bg-[#111315]"
         >
             <div
                 class="flex items-center border-b border-zinc-200 p-4 dark:border-[#1d2125]"
             >
                 <div>
-                    <h2 class="font-semibold">Conversation activity</h2>
+                    <h2 id="inbox-activity-title" class="font-semibold">
+                        Conversation activity
+                    </h2>
                     <p class="text-xs text-zinc-500">
                         Assignment, status, snooze, and archive history
                     </p>
                 </div>
                 <button
+                    data-dialog-initial-focus
                     type="button"
                     class="ml-auto p-2"
                     aria-label="Close activity"
@@ -2314,13 +2488,22 @@ function participantSummary(thread: ThreadRow): string {
         @click.self="showShortcuts = false"
     >
         <div
+            data-inbox-dialog
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="inbox-shortcuts-title"
+            tabindex="-1"
             class="grid w-full max-w-sm gap-3 rounded-xl border border-zinc-200 bg-white p-5 shadow-xl dark:border-[#1d2125] dark:bg-[#111315]"
         >
             <div class="flex items-center">
-                <h2 class="font-semibold">Keyboard shortcuts</h2>
+                <h2 id="inbox-shortcuts-title" class="font-semibold">
+                    Keyboard shortcuts
+                </h2>
                 <button
+                    data-dialog-initial-focus
                     type="button"
                     class="ml-auto rounded p-1 text-zinc-500 hover:text-zinc-950 dark:hover:text-zinc-100"
+                    aria-label="Close keyboard shortcuts"
                     @click="showShortcuts = false"
                 >
                     <X class="size-4" />

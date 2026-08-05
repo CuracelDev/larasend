@@ -9,6 +9,7 @@ use App\Models\WebhookLog;
 use App\Services\InboundEmailIngestor;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Str;
 use Throwable;
 
 class CloudflareInboundController extends Controller
@@ -31,6 +32,17 @@ class CloudflareInboundController extends Controller
             'to' => ['required', 'string', 'max:320'],
             'raw' => ['required', 'string'],
         ]);
+
+        $recipientDomain = Str::lower(Str::after($validated['to'], '@'));
+        $allowedRecipient = $recipientDomain !== '' && $source->project
+            ->domains()
+            ->whereNotNull('inbound_enabled_at')
+            ->get(['domain', 'inbound_domain'])
+            ->contains(fn ($domain): bool => $recipientDomain === Str::lower($domain->inbound_domain ?: $domain->domain));
+
+        if (! $allowedRecipient) {
+            return response()->json(['message' => 'Recipient domain is not enabled for this source.'], 422);
+        }
 
         $log = WebhookLog::create([
             'source_id' => $source->id,

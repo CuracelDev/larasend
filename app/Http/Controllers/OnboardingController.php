@@ -113,6 +113,9 @@ class OnboardingController extends Controller
      */
     public function validateCredentials(Request $request, ProjectContext $context): JsonResponse
     {
+        $workspace = $context->workspaceFor($request->user());
+        abort_unless($workspace->canManageProjects($request->user()), 403);
+
         $validated = $request->validate([
             'provider' => ['required', Rule::enum(SourceProvider::class)],
             'ses_region' => ['nullable', 'string', 'max:50'],
@@ -388,7 +391,11 @@ class OnboardingController extends Controller
             return 'aws_keys';
         }
 
-        if (app()->environment('production')) {
+        if (
+            $source
+            && blank($source->aws_access_key_id)
+            && $this->providers->forSource($source)->hasSendingCredentials($source)
+        ) {
             return 'instance_role';
         }
 

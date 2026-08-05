@@ -5,9 +5,10 @@ use App\Http\Controllers\Api\SuppressionController;
 use App\Http\Controllers\Webhooks\CloudflareInboundController;
 use App\Http\Controllers\Webhooks\SesWebhookController;
 use App\Http\Middleware\AuthenticateLarasendApiKey;
+use App\Http\Middleware\ThrottleLarasendApiKey;
 use Illuminate\Support\Facades\Route;
 
-Route::middleware(AuthenticateLarasendApiKey::class)->group(function () {
+Route::middleware(['throttle:larasend-api-ip', AuthenticateLarasendApiKey::class, ThrottleLarasendApiKey::class])->group(function () {
     Route::get('emails', [EmailController::class, 'index'])->name('api.emails.index');
     Route::post('emails', [EmailController::class, 'store'])->name('api.emails.store');
     Route::get('emails/{email}', [EmailController::class, 'show'])->name('api.emails.show');

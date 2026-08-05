@@ -2,9 +2,12 @@
 
 namespace App\Jobs;
 
+use App\Exceptions\UnsafeWebhookUrlException;
+use App\Exceptions\WebhookDnsResolutionException;
 use App\Models\EmailEvent;
 use App\Models\WebhookDelivery;
 use App\Models\WebhookEndpoint;
+use App\Services\WebhookUrlGuard;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Http\Client\ConnectionException;
@@ -39,7 +42,7 @@ class DeliverWebhook implements ShouldQueue
     /**
      * Execute the job.
      */
-    public function handle(): void
+    public function handle(WebhookUrlGuard $urlGuard): void
     {
         $endpoint = WebhookEndpoint::query()->find($this->webhookEndpointId);
         $event = EmailEvent::query()
@@ -59,11 +62,44 @@ class DeliverWebhook implements ShouldQueue
         $startedAt = hrtime(true);
 
         try {
+            $requestOptions = $urlGuard->requestOptions($endpoint->url);
+        } catch (UnsafeWebhookUrlException $exception) {
+            $this->recordDelivery(
+                endpoint: $endpoint,
+                event: $event,
+                payload: $payload,
+                status: 'fail',
+                httpStatus: null,
+                latencyMs: 0,
+                responseBody: $exception->getMessage(),
+            );
+            $endpoint->forceFill(['status' => 'paused'])->save();
+
+            return;
+        } catch (WebhookDnsResolutionException $exception) {
+            $this->recordDelivery(
+                endpoint: $endpoint,
+                event: $event,
+                payload: $payload,
+                status: 'fail',
+                httpStatus: null,
+                latencyMs: 0,
+                responseBody: $exception->getMessage(),
+            );
+
+            $this->releaseForRetry($exception->getMessage());
+
+            return;
+        }
+
+        try {
             $response = Http::withHeaders($this->headers($endpoint, $event, $body))
+                ->withOptions($requestOptions)
                 ->acceptJson()
                 ->asJson()
                 ->connectTimeout(5)
                 ->timeout(10)
+                ->withoutRedirecting()
                 ->withBody($body, 'application/json')
                 ->post($endpoint->url);
 
@@ -85,7 +121,7 @@ class DeliverWebhook implements ShouldQueue
                 return;
             }
 
-            $this->releaseForRetry();
+            $this->releaseForRetry("Webhook endpoint returned HTTP {$response->status()}.");
         } catch (ConnectionException $exception) {
             $this->recordDelivery(
                 endpoint: $endpoint,
@@ -97,7 +133,7 @@ class DeliverWebhook implements ShouldQueue
                 responseBody: Str::limit($exception->getMessage(), 2000, ''),
             );
 
-            $this->releaseForRetry();
+            $this->releaseForRetry($exception->getMessage());
         }
     }
 
@@ -179,14 +215,18 @@ class DeliverWebhook implements ShouldQueue
         return (int) round((hrtime(true) - $startedAt) / 1_000_000);
     }
 
-    private function releaseForRetry(): void
+    private function releaseForRetry(string $reason): void
     {
         $attempt = max($this->attempts() - 1, 0);
         $delay = $this->backoff()[$attempt] ?? last($this->backoff());
 
         if ($this->attempts() < $this->tries) {
             $this->release($delay);
+
+            return;
         }
+
+        throw new \RuntimeException($reason);
     }
 
     /**
@@ -194,6 +234,6 @@ class DeliverWebhook implements ShouldQueue
      */
     public function failed(Throwable $exception): void
     {
-        //
+        report($exception);
     }
 }
