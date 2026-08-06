@@ -32,6 +32,8 @@ function threadingFixture(): array
         'status' => 'verified',
         'dns_records' => [],
         'verified_at' => now(),
+        'inbound_enabled_at' => now(),
+        'inbound_domain' => 'example.com',
     ]);
 
     return [$workspace, $project, $source];

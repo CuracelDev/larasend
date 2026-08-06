@@ -167,9 +167,9 @@ class ActivityController extends Controller
                 'has_aws_session_token' => filled($source->aws_session_token),
                 'has_cloudflare_credentials' => filled($source->cloudflare_api_token),
                 'uses_instance_role' => $source->provider === SourceProvider::Ses
-                    && app()->environment('production')
                     && blank($source->aws_access_key_id)
-                    && blank($source->aws_secret_access_key),
+                    && blank($source->aws_secret_access_key)
+                    && $this->providers->forSource($source)->hasSendingCredentials($source),
                 'can_send' => $canSend,
                 'capabilities' => $this->sourceCapabilities($source),
             ] : null,

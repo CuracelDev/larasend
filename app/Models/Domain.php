@@ -16,6 +16,8 @@ class Domain extends Model
         'status',
         'dns_records',
         'verified_at',
+        'inbound_enabled_at',
+        'inbound_domain',
     ];
 
     protected function casts(): array
@@ -23,6 +25,7 @@ class Domain extends Model
         return [
             'dns_records' => 'array',
             'verified_at' => 'datetime',
+            'inbound_enabled_at' => 'datetime',
         ];
     }
 

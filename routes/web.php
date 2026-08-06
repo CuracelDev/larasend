@@ -40,6 +40,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::delete('projects/{project}', [ProjectController::class, 'destroy'])->name('projects.destroy');
     Route::post('workspace/members', [WorkspaceMemberController::class, 'store'])->name('workspace-members.store');
     Route::put('workspace/members/{user}', [WorkspaceMemberController::class, 'update'])->name('workspace-members.update');
+    Route::patch('workspace/members/{user}/ownership', [WorkspaceMemberController::class, 'transferOwnership'])->name('workspace-members.ownership.transfer');
     Route::delete('workspace/members/{user}', [WorkspaceMemberController::class, 'destroy'])->name('workspace-members.destroy');
 
     Route::prefix('projects/{project}')->name('projects.')->group(function () {

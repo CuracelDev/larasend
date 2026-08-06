@@ -185,6 +185,8 @@ const availableZones = computed<ZoneOption[]>(
 const selectedZoneName = ref('');
 const subdomainLabel = ref('mail');
 const fromLocalPart = ref('notifications');
+const lastSuggestedFromEmail = ref('');
+const furthestStepIndex = ref(0);
 const skipsValidation = computed(
     () => form.credential_mode === 'configure_later',
 );
@@ -202,11 +204,26 @@ watch([selectedZoneName, subdomainLabel], ([zone, label]) => {
 watch(
     () => form.sending_domain,
     (domain) => {
-        if (domain) {
-            form.default_from_email = `${fromLocalPart.value}@${domain}`;
+        if (!domain) {
+            return;
         }
+
+        const suggestion = `${fromLocalPart.value}@${domain}`;
+
+        if (
+            !form.default_from_email ||
+            form.default_from_email === lastSuggestedFromEmail.value
+        ) {
+            form.default_from_email = suggestion;
+        }
+
+        lastSuggestedFromEmail.value = suggestion;
     },
 );
+
+watch(currentStepIndex, (index) => {
+    furthestStepIndex.value = Math.max(furthestStepIndex.value, index);
+});
 
 function validateCredentials(): void {
     validationFailed.value = false;
@@ -320,7 +337,9 @@ function goBack(): void {
 }
 
 function goToStep(index: number): void {
-    currentStepIndex.value = index;
+    if (index <= furthestStepIndex.value) {
+        currentStepIndex.value = index;
+    }
 }
 
 function submit(): void {
@@ -420,12 +439,16 @@ function submit(): void {
                             v-for="(step, index) in wizardSteps"
                             :key="step.key"
                             type="button"
+                            :disabled="index > furthestStepIndex"
                             class="flex items-center gap-2.5 rounded-md px-2 py-2 text-left transition hover:bg-zinc-50 dark:hover:bg-[#171a1d]"
-                            :class="
+                            :class="[
                                 index === currentStepIndex
                                     ? 'bg-teal-50 dark:bg-teal-400/10'
-                                    : ''
-                            "
+                                    : '',
+                                index > furthestStepIndex
+                                    ? 'cursor-not-allowed opacity-45 hover:bg-transparent dark:hover:bg-transparent'
+                                    : '',
+                            ]"
                             @click="goToStep(index)"
                         >
                             <span

@@ -10,28 +10,21 @@
  * emails are never silently dropped when Larasend is unreachable.
  */
 export default {
-  async email(message, env) {
-    const buffer = await new Response(message.raw).arrayBuffer();
-    const bytes = new Uint8Array(buffer);
+    async email(message, env) {
+        const response = await fetch(env.LARASEND_INBOUND_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'message/rfc822',
+                'Larasend-Envelope-From': message.from,
+                'Larasend-Envelope-To': message.to,
+            },
+            body: message.raw,
+        });
 
-    let binary = "";
-    const chunkSize = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-    }
-
-    const response = await fetch(env.LARASEND_INBOUND_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        from: message.from,
-        to: message.to,
-        raw: btoa(binary),
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Larasend inbound endpoint responded ${response.status}`);
-    }
-  },
+        if (!response.ok) {
+            throw new Error(
+                `Larasend inbound endpoint responded ${response.status}`,
+            );
+        }
+    },
 };

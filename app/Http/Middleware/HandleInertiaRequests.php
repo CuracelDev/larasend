@@ -4,13 +4,17 @@ namespace App\Http\Middleware;
 
 use App\Models\Project;
 use App\Models\User;
+use App\Support\ControlMail;
 use App\Support\ProjectContext;
 use Illuminate\Http\Request;
 use Inertia\Middleware;
 
 class HandleInertiaRequests extends Middleware
 {
-    public function __construct(private ProjectContext $projects) {}
+    public function __construct(
+        private ProjectContext $projects,
+        private ControlMail $controlMail,
+    ) {}
 
     /**
      * The root template that's loaded on the first page visit.
@@ -49,6 +53,9 @@ class HandleInertiaRequests extends Middleware
             'build' => [
                 'version' => config('app.version'),
                 'sha' => config('app.git_sha'),
+            ],
+            'controlMail' => [
+                'configured' => $this->controlMail->isConfigured(),
             ],
             'settingsNavigation' => fn (): ?array => $this->settingsNavigation($request),
             'sidebarOpen' => ! $request->hasCookie('sidebar_state') || $request->cookie('sidebar_state') === 'true',

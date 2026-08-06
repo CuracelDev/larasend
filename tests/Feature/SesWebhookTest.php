@@ -9,6 +9,7 @@ use App\Models\WebhookLog;
 use App\Models\Workspace;
 use App\Services\SesEventNormalizer;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 
 function sesWebhookFixture(): array
@@ -128,6 +129,89 @@ it('normalizes ses delivery events', function () {
 
     expect($email->fresh()->status)->toBe('delivered')
         ->and($email->events()->where('event_type', 'delivery')->exists())->toBeTrue();
+});
+
+it('deduplicates repeated sns notifications by message id', function () {
+    [$source, $email] = sesWebhookFixture();
+    Http::fake([SES_TEST_SIGNING_CERT_URL => Http::response(sesTestPublicCertificate())]);
+    $message = [
+        'eventType' => 'Delivery',
+        'mail' => ['messageId' => 'ses-1', 'timestamp' => now()->toIso8601String(), 'destination' => ['maya@example.com']],
+        'delivery' => ['recipients' => ['maya@example.com'], 'timestamp' => now()->toIso8601String()],
+    ];
+    $envelope = sesSignedSnsEnvelope('Notification', ['Message' => json_encode($message)]);
+
+    $this->postJson("/api/webhooks/ses/{$source->webhook_token}", $envelope)->assertSuccessful();
+    $this->postJson("/api/webhooks/ses/{$source->webhook_token}", $envelope)->assertSuccessful();
+
+    expect($email->events()->where('event_type', 'delivery')->count())->toBe(1);
+});
+
+it('does not regress an advanced email status when an older event arrives late', function () {
+    [$source, $email] = sesWebhookFixture();
+    Http::fake([SES_TEST_SIGNING_CERT_URL => Http::response(sesTestPublicCertificate())]);
+    $click = [
+        'eventType' => 'Click',
+        'mail' => ['messageId' => 'ses-1', 'timestamp' => now()->toIso8601String(), 'destination' => ['maya@example.com']],
+        'click' => ['link' => 'https://example.com', 'timestamp' => now()->toIso8601String()],
+    ];
+    $delivery = [
+        'eventType' => 'Delivery',
+        'mail' => ['messageId' => 'ses-1', 'timestamp' => now()->subMinute()->toIso8601String(), 'destination' => ['maya@example.com']],
+        'delivery' => ['recipients' => ['maya@example.com'], 'timestamp' => now()->subMinute()->toIso8601String()],
+    ];
+
+    $this->postJson(
+        "/api/webhooks/ses/{$source->webhook_token}",
+        sesSignedSnsEnvelope('Notification', ['Message' => json_encode($click)]),
+    )->assertSuccessful();
+    $this->postJson(
+        "/api/webhooks/ses/{$source->webhook_token}",
+        sesSignedSnsEnvelope('Notification', ['Message' => json_encode($delivery)]),
+    )->assertSuccessful();
+
+    expect($email->fresh()->status)->toBe('clicked')
+        ->and($email->events()->pluck('event_type')->all())->toContain('click', 'delivery');
+});
+
+it('reloads and locks the email before advancing its ses status', function () {
+    [$source, $email] = sesWebhookFixture();
+    $retrievedEvent = 'eloquent.retrieved: '.Email::class;
+    $advancedAfterLookup = false;
+
+    Event::listen($retrievedEvent, function (Email $retrievedEmail) use ($email, &$advancedAfterLookup): void {
+        if ($advancedAfterLookup || $retrievedEmail->id !== $email->id) {
+            return;
+        }
+
+        $advancedAfterLookup = true;
+        DB::table('emails')->where('id', $email->id)->update([
+            'status' => 'clicked',
+            'updated_at' => now(),
+        ]);
+    });
+
+    try {
+        app(SesEventNormalizer::class)->record($source, [
+            'eventType' => 'Delivery',
+            'mail' => [
+                'messageId' => 'ses-1',
+                'timestamp' => now()->toIso8601String(),
+                'destination' => ['maya@example.com'],
+            ],
+            'delivery' => [
+                'recipients' => ['maya@example.com'],
+                'timestamp' => now()->toIso8601String(),
+            ],
+        ], 'sns-stale-email-model');
+    } finally {
+        Event::forget($retrievedEvent);
+    }
+
+    expect($advancedAfterLookup)->toBeTrue()
+        ->and($email->fresh()->status)->toBe('clicked')
+        ->and($email->events()->where('event_type', 'delivery')->exists())->toBeTrue()
+        ->and(file_get_contents(app_path('Services/SesEventNormalizer.php')))->toContain('->lockForUpdate()');
 });
 
 it('records suppressions for permanent ses bounces and complaints', function () {

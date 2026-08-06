@@ -24,6 +24,7 @@ class AuthenticateLarasendApiKey
 
         $apiKey = ApiKey::query()
             ->with(['project.workspace', 'source'])
+            ->whereHas('project', fn ($query) => $query->whereNull('archived_at'))
             ->where('key_hash', hash('sha256', $plainTextToken))
             ->where(function ($query) {
                 $query->whereNull('expires_at')->orWhere('expires_at', '>', now());

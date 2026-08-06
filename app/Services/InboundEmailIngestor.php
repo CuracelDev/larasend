@@ -5,8 +5,10 @@ namespace App\Services;
 use App\Jobs\DeliverInboundWebhook;
 use App\Models\InboundEmail;
 use App\Models\Source;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Throwable;
 use ZBateson\MailMimeParser\Header\HeaderConsts;
 use ZBateson\MailMimeParser\IMessage;
 use ZBateson\MailMimeParser\MailMimeParser;
@@ -27,35 +29,60 @@ class InboundEmailIngestor
     public function ingest(Source $source, string $envelopeFrom, string $envelopeTo, string $mime): InboundEmail
     {
         $project = $source->project;
-        $publicId = 'inbound_'.Str::random(24);
-
-        $mimePath = "inbound/{$project->id}/{$publicId}.eml";
-        Storage::disk('local')->put($mimePath, $mime);
-
         $message = $this->parser->parse($mime, autoClose: true);
+        $messageId = trim((string) $message->getHeaderValue(HeaderConsts::MESSAGE_ID), '<>') ?: null;
+        $deduplicationKey = hash('sha256', $source->id.'|'.($messageId ?: hash('sha256', $mime)));
+        $existing = InboundEmail::query()
+            ->where('deduplication_key', $deduplicationKey)
+            ->first();
 
-        $inbound = InboundEmail::create([
-            'public_id' => $publicId,
-            'workspace_id' => $project->workspace_id,
-            'project_id' => $project->id,
-            'source_id' => $source->id,
-            'from_email' => $this->headerAddress($message) ?? $envelopeFrom,
-            'from_name' => $message->getHeader(HeaderConsts::FROM)?->getPersonName() ?: null,
-            'to_email' => $envelopeTo,
-            'subject' => $message->getSubject(),
-            'text' => $message->getTextContent(),
-            'html' => $message->getHtmlContent(),
-            'headers' => $this->interestingHeaders($message),
-            'attachments' => $this->attachmentMetadata($message),
-            'message_id' => trim((string) $message->getHeaderValue(HeaderConsts::MESSAGE_ID), '<>') ?: null,
-            'in_reply_to' => trim((string) $message->getHeaderValue(HeaderConsts::IN_REPLY_TO), '<>') ?: null,
-            'mime_disk' => 'local',
-            'mime_path' => $mimePath,
-            'mime_size' => strlen($mime),
-            'received_at' => now(),
-        ]);
+        if ($existing) {
+            DeliverInboundWebhook::dispatch($existing->id)->onQueue('webhooks');
 
-        $this->threads->attachInbound($inbound);
+            return $existing;
+        }
+
+        $publicId = 'inbound_'.Str::random(24);
+        $mimeDisk = (string) config('larasend.mime_disk', 'local');
+        $mimePath = "inbound/{$project->id}/{$publicId}.eml";
+
+        if (! Storage::disk($mimeDisk)->put($mimePath, $mime)) {
+            throw new \RuntimeException("Unable to store MIME content for {$publicId}.");
+        }
+
+        try {
+            $inbound = DB::transaction(function () use ($source, $project, $publicId, $mimeDisk, $mimePath, $mime, $message, $messageId, $deduplicationKey, $envelopeFrom, $envelopeTo): InboundEmail {
+                $inbound = InboundEmail::create([
+                    'public_id' => $publicId,
+                    'workspace_id' => $project->workspace_id,
+                    'project_id' => $project->id,
+                    'source_id' => $source->id,
+                    'from_email' => $this->headerAddress($message) ?? $envelopeFrom,
+                    'from_name' => $message->getHeader(HeaderConsts::FROM)?->getPersonName() ?: null,
+                    'to_email' => $envelopeTo,
+                    'subject' => $message->getSubject(),
+                    'text' => $message->getTextContent(),
+                    'html' => $message->getHtmlContent(),
+                    'headers' => $this->interestingHeaders($message),
+                    'attachments' => $this->attachmentMetadata($message),
+                    'message_id' => $messageId,
+                    'deduplication_key' => $deduplicationKey,
+                    'in_reply_to' => trim((string) $message->getHeaderValue(HeaderConsts::IN_REPLY_TO), '<>') ?: null,
+                    'mime_disk' => $mimeDisk,
+                    'mime_path' => $mimePath,
+                    'mime_size' => strlen($mime),
+                    'received_at' => now(),
+                ]);
+
+                $this->threads->attachInbound($inbound);
+
+                return $inbound;
+            });
+        } catch (Throwable $exception) {
+            Storage::disk($mimeDisk)->delete($mimePath);
+
+            throw $exception;
+        }
 
         DeliverInboundWebhook::dispatch($inbound->id)->onQueue('webhooks');
 

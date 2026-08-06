@@ -4,7 +4,9 @@ use App\Models\Project;
 use App\Models\Source;
 use App\Models\User;
 use App\Models\Workspace;
-use Illuminate\Auth\Notifications\ResetPassword;
+use App\Notifications\ControlEmailVerification;
+use App\Notifications\ControlPasswordReset;
+use Illuminate\Contracts\Notifications\Dispatcher as NotificationDispatcher;
 use Illuminate\Support\Facades\Notification;
 
 function workspaceMembersFixture(): array
@@ -52,6 +54,7 @@ it('allows workspace owners to add an existing user as a member', function () {
 
 it('creates a user and sends a setup link when adding a new email', function () {
     Notification::fake();
+    config(['larasend.control_mailer' => 'smtp']);
 
     [$owner, $workspace] = workspaceMembersFixture();
 
@@ -68,7 +71,60 @@ it('creates a user and sends a setup link when adding a new email', function () 
         ->and($workspace->users()->whereKey($member->id)->first()?->pivot->role)
         ->toBe('member');
 
-    Notification::assertSentTo($member, ResetPassword::class);
+    expect($member->email_verification_required_at)->not->toBeNull();
+    Notification::assertSentTo($member, ControlEmailVerification::class);
+    Notification::assertSentTo($member, ControlPasswordReset::class);
+    expect($member->fresh()->workspace_invitation_pending_at)->toBeNull();
+});
+
+it('blocks invitations that would create an unreachable user without control mail', function () {
+    [$owner, $workspace] = workspaceMembersFixture();
+
+    $this->actingAs($owner)
+        ->post('/workspace/members', [
+            'email' => 'unreachable@example.com',
+            'role' => 'member',
+        ])
+        ->assertSessionHasErrors('email');
+
+    expect(User::query()->where('email', 'unreachable@example.com')->exists())->toBeFalse()
+        ->and($workspace->users()->where('email', 'unreachable@example.com')->exists())->toBeFalse();
+});
+
+it('retries an invitation whose initial notification dispatch failed', function () {
+    config(['larasend.control_mailer' => 'smtp']);
+    [$owner, $workspace] = workspaceMembersFixture();
+
+    $notifications = app(NotificationDispatcher::class);
+    $failingNotifications = Mockery::mock(NotificationDispatcher::class);
+    $failingNotifications
+        ->shouldReceive('send')
+        ->once()
+        ->andThrow(new RuntimeException('The queue is unavailable.'));
+    $this->app->instance(NotificationDispatcher::class, $failingNotifications);
+
+    $this->withoutExceptionHandling();
+
+    expect(fn () => $this->actingAs($owner)->post('/workspace/members', [
+        'email' => 'pending@example.com',
+        'role' => 'member',
+    ]))->toThrow(RuntimeException::class);
+
+    $retryNotifications = Mockery::mock(NotificationDispatcher::class);
+    $retryNotifications->shouldReceive('send')->twice()->andReturnNull();
+    $this->app->instance(NotificationDispatcher::class, $retryNotifications);
+    $member = User::query()->where('email', 'pending@example.com')->firstOrFail();
+
+    $this->actingAs($owner)
+        ->post('/workspace/members', [
+            'email' => $member->email,
+            'role' => 'member',
+        ])
+        ->assertRedirect();
+
+    expect($member->fresh()->workspace_invitation_pending_at)->toBeNull();
+
+    $this->app->instance(NotificationDispatcher::class, $notifications);
 });
 
 it('shows workspace members on the projects screen', function () {
@@ -125,11 +181,11 @@ it('allows owners to update and remove workspace members', function () {
     $workspace->users()->attach($member, ['role' => 'member']);
 
     $this->actingAs($owner)
-        ->put("/workspace/members/{$member->id}", ['role' => 'owner'])
+        ->put("/workspace/members/{$member->id}", ['role' => 'sender'])
         ->assertRedirect();
 
     expect($workspace->users()->whereKey($member->id)->first()?->pivot->role)
-        ->toBe('owner');
+        ->toBe('sender');
 
     $this->actingAs($owner)
         ->delete("/workspace/members/{$member->id}")
@@ -144,4 +200,54 @@ it('does not allow removing the workspace owner', function () {
     $this->actingAs($owner)
         ->delete("/workspace/members/{$owner->id}")
         ->assertStatus(422);
+});
+
+it('transfers workspace ownership only to an existing workspace member', function () {
+    [$owner, $workspace] = workspaceMembersFixture();
+    $newOwner = User::factory()->create(['email' => 'new-owner@example.com']);
+    $workspace->users()->attach($newOwner, ['role' => 'member']);
+
+    $this->actingAs($owner)
+        ->patch("/workspace/members/{$newOwner->id}/ownership")
+        ->assertRedirect();
+
+    expect($workspace->fresh()->owner_id)->toBe($newOwner->id)
+        ->and($workspace->users()->whereKey($newOwner->id)->first()?->pivot->role)->toBe('owner')
+        ->and($workspace->users()->whereKey($owner->id)->first()?->pivot->role)->toBe('member');
+});
+
+it('forbids non-owners from transferring workspace ownership', function () {
+    [$owner, $workspace] = workspaceMembersFixture();
+    $member = User::factory()->create();
+    $workspace->users()->attach($member, ['role' => 'member']);
+
+    $this->actingAs($member)
+        ->patch("/workspace/members/{$owner->id}/ownership")
+        ->assertForbidden();
+
+    expect($workspace->fresh()->owner_id)->toBe($owner->id);
+});
+
+it('does not transfer workspace ownership to a user outside the workspace', function () {
+    [$owner, $workspace] = workspaceMembersFixture();
+    $outsider = User::factory()->create();
+
+    $this->actingAs($owner)
+        ->patch("/workspace/members/{$outsider->id}/ownership")
+        ->assertNotFound();
+
+    expect($workspace->fresh()->owner_id)->toBe($owner->id);
+});
+
+it('does not treat owner as an assignable member role', function () {
+    [$owner, $workspace] = workspaceMembersFixture();
+    $member = User::factory()->create();
+    $workspace->users()->attach($member, ['role' => 'member']);
+
+    $this->actingAs($owner)
+        ->put("/workspace/members/{$member->id}", ['role' => 'owner'])
+        ->assertSessionHasErrors('role');
+
+    expect($workspace->fresh()->owner_id)->toBe($owner->id)
+        ->and($workspace->users()->whereKey($member->id)->first()?->pivot->role)->toBe('member');
 });

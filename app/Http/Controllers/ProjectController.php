@@ -161,6 +161,6 @@ class ProjectController extends Controller
 
     private function canManageProjects(Workspace $workspace, ?User $user): bool
     {
-        return $user instanceof User && $workspace->canManageMembers($user);
+        return $user instanceof User && $workspace->canManageProjects($user);
     }
 }

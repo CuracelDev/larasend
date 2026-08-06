@@ -27,7 +27,7 @@ class UpdateWorkspaceMemberRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'role' => ['required', Rule::in(['owner', 'member', 'sender', 'api_keys', 'domains', 'read_only'])],
+            'role' => ['required', Rule::in(['member', 'sender', 'api_keys', 'domains', 'read_only'])],
         ];
     }
 }

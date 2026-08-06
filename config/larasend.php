@@ -31,4 +31,30 @@ return [
 
     'show_landing_page' => env('LARASEND_SHOW_LANDING_PAGE', false),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Control Email Mailer
+    |--------------------------------------------------------------------------
+    |
+    | Authentication and recovery messages must use an independently tested
+    | mailer so this Larasend instance is never its own only recovery path.
+    | Leave this blank until that dedicated mailer is working.
+    |
+    */
+
+    'control_mailer' => env('LARASEND_CONTROL_MAILER'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Private MIME Storage
+    |--------------------------------------------------------------------------
+    |
+    | Raw outbound and inbound messages must be available to queue workers and
+    | every application replica. Use an object-storage disk in distributed
+    | environments such as Laravel Cloud.
+    |
+    */
+
+    'mime_disk' => env('LARASEND_MIME_DISK', env('FILESYSTEM_DISK', 'local')),
+
 ];

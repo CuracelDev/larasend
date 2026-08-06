@@ -43,6 +43,33 @@ it('routes fresh users from dashboard into onboarding', function () {
         ->assertRedirect('/onboarding');
 });
 
+it('prevents read only members from changing onboarding configuration', function () {
+    $owner = User::factory()->create();
+    $project = app(ProjectContext::class)->projectFor($owner);
+    $member = User::factory()->create();
+    $project->workspace->users()->attach($member, ['role' => 'read_only']);
+
+    $this->actingAs($member)
+        ->post('/onboarding', [
+            'credential_mode' => 'configure_later',
+            'source_name' => 'Compromised',
+            'environment' => 'prod',
+            'ses_region' => 'us-east-1',
+            'create_api_key' => false,
+        ])
+        ->assertForbidden();
+
+    $this->actingAs($member)
+        ->postJson('/onboarding/validate', [
+            'provider' => 'ses',
+            'ses_region' => 'us-east-1',
+        ])
+        ->assertForbidden();
+
+    expect($project->fresh()->name)->toBe('My Project')
+        ->and($project->sources()->firstOrFail()->name)->toBe('Production');
+});
+
 it('stores onboarding setup, creates a domain, api key, and webhook endpoint', function () {
     Http::fake([
         'https://email.us-east-1.amazonaws.com/v2/email/account' => Http::response([

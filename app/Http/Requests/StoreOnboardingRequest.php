@@ -2,6 +2,8 @@
 
 namespace App\Http\Requests;
 
+use App\Rules\PublicWebhookUrl;
+use App\Support\ProjectContext;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -9,7 +11,13 @@ class StoreOnboardingRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return true;
+        $user = $this->user();
+
+        if ($user === null) {
+            return false;
+        }
+
+        return app(ProjectContext::class)->workspaceFor($user)->canManageProjects($user);
     }
 
     /**
@@ -38,7 +46,7 @@ class StoreOnboardingRequest extends FormRequest
             'sending_domain' => ['nullable', 'string', 'max:255', 'regex:/^(?!-)[A-Za-z0-9.-]+(?<!-)$/'],
             'create_api_key' => ['boolean'],
             'api_key_name' => ['nullable', 'string', 'max:255'],
-            'webhook_url' => ['nullable', 'url', 'max:2048'],
+            'webhook_url' => ['nullable', 'url:http,https', 'max:2048', new PublicWebhookUrl],
         ];
     }
 }

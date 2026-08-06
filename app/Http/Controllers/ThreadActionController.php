@@ -305,6 +305,10 @@ class ThreadActionController extends Controller
             'assigned_to_user_id' => ['nullable', 'integer'],
         ]);
 
+        if (! in_array($validated['action'], ['mark_read', 'mark_unread'], true)) {
+            abort_unless($project->workspace->canManageInbox($user), 403);
+        }
+
         if ($validated['action'] === 'assign' && ($validated['assigned_to_user_id'] ?? null) !== null) {
             abort_unless($project->workspace->users()->whereKey($validated['assigned_to_user_id'])->exists(), 422);
         }
@@ -344,7 +348,8 @@ class ThreadActionController extends Controller
 
     public function archive(Request $request, string $projectSlug, Thread $thread): RedirectResponse
     {
-        $this->authorizeThread($thread);
+        $project = $this->authorizeThread($thread);
+        $this->authorizeInboxManagement($project);
 
         $thread->forceFill(['archived_at' => now()])->save();
         $this->recordEvent($thread, 'archived');
@@ -354,7 +359,8 @@ class ThreadActionController extends Controller
 
     public function unarchive(Request $request, string $projectSlug, Thread $thread): RedirectResponse
     {
-        $this->authorizeThread($thread);
+        $project = $this->authorizeThread($thread);
+        $this->authorizeInboxManagement($project);
 
         $thread->forceFill(['archived_at' => null])->save();
         $this->recordEvent($thread, 'restored');
@@ -368,7 +374,8 @@ class ThreadActionController extends Controller
      */
     public function snooze(Request $request, string $projectSlug, Thread $thread): RedirectResponse
     {
-        $this->authorizeThread($thread);
+        $project = $this->authorizeThread($thread);
+        $this->authorizeInboxManagement($project);
 
         $validated = $request->validate([
             'until' => ['required', 'in:later_today,tomorrow,next_week'],
@@ -390,7 +397,8 @@ class ThreadActionController extends Controller
 
     public function unsnooze(Request $request, string $projectSlug, Thread $thread): RedirectResponse
     {
-        $this->authorizeThread($thread);
+        $project = $this->authorizeThread($thread);
+        $this->authorizeInboxManagement($project);
 
         $thread->forceFill(['snoozed_until' => null])->save();
         $this->recordEvent($thread, 'unsnoozed');
@@ -401,6 +409,7 @@ class ThreadActionController extends Controller
     public function updateWorkflow(Request $request, string $projectSlug, Thread $thread): RedirectResponse
     {
         $project = $this->authorizeThread($thread);
+        $this->authorizeInboxManagement($project);
         $validated = $request->validate([
             'status' => ['sometimes', 'in:open,pending,closed'],
             'priority' => ['sometimes', 'in:low,normal,high,urgent'],
@@ -422,12 +431,12 @@ class ThreadActionController extends Controller
 
     /**
      * Internal note on the conversation — visible to the team in the
-     * timeline, never emailed. Any member can annotate, including
-     * read-only ones.
+     * timeline and never emailed.
      */
     public function storeNote(Request $request, string $projectSlug, Thread $thread): RedirectResponse
     {
-        $this->authorizeThread($thread);
+        $project = $this->authorizeThread($thread);
+        $this->authorizeInboxManagement($project);
 
         $validated = $request->validate([
             'body' => ['required', 'string', 'max:10000'],
@@ -453,6 +462,13 @@ class ThreadActionController extends Controller
         abort_unless($thread->project_id === $project->id, 404);
 
         return $project;
+    }
+
+    private function authorizeInboxManagement(Project $project): void
+    {
+        $user = Auth::user();
+
+        abort_unless($user instanceof User && $project->workspace->canManageInbox($user), 403);
     }
 
     /** @param array<string, mixed> $metadata */

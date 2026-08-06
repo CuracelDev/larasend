@@ -21,6 +21,7 @@ class InboundEmail extends Model
         'headers',
         'attachments',
         'message_id',
+        'deduplication_key',
         'in_reply_to',
         'mime_disk',
         'mime_path',

@@ -5,6 +5,7 @@ namespace Database\Seeders;
 use App\Models\ApiKey;
 use App\Models\Domain;
 use App\Models\Email;
+use App\Models\InboundEmail;
 use App\Models\Project;
 use App\Models\Source;
 use App\Models\Template;
@@ -14,57 +15,48 @@ use App\Models\Workspace;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use RuntimeException;
 
 class DatabaseSeeder extends Seeder
 {
+    public function __construct(private InboxDemoSeeder $inboxDemoSeeder) {}
+
     public function run(): void
     {
-        $user = User::query()->orderBy('id')->first();
+        if (! app()->environment(['local', 'testing'])) {
+            throw new RuntimeException('The demo database seeder is only available in local and testing environments.');
+        }
 
-        if (! $user) {
-            $user = User::query()->create([
-                'name' => 'Demo User',
-                'email' => 'test@example.com',
+        $user = User::query()->firstOrCreate(
+            ['email' => 'demo@larasend.test'],
+            [
+                'name' => 'Larasend Demo',
                 'email_verified_at' => now(),
                 'password' => Hash::make('password'),
-            ]);
-        }
+            ],
+        );
 
-        $workspace = $user->workspaces()->with('projects')->first();
-
-        if (! $workspace) {
-            $workspace = Workspace::query()->updateOrCreate(
-                ['slug' => 'larasend'],
-                [
-                    'owner_id' => $user->id,
-                    'name' => 'Larasend',
-                ],
-            );
-        } else {
-            $workspace->forceFill([
+        $workspace = Workspace::query()->updateOrCreate(
+            ['slug' => 'larasend-demo'],
+            [
                 'owner_id' => $user->id,
-            ])->save();
-        }
+                'name' => 'Larasend Demo',
+            ],
+        );
 
         $workspace->users()->syncWithoutDetaching([
             $user->id => ['role' => 'owner'],
         ]);
 
-        $project = $workspace->projects()->where('slug', 'harborlight')->first()
-            ?? $workspace->projects()->first()
-            ?? Project::query()->create([
-                'workspace_id' => $workspace->id,
+        $project = $workspace->projects()->updateOrCreate(
+            ['slug' => 'harborlight'],
+            [
                 'name' => 'harborlight',
-                'slug' => 'harborlight',
                 'default_environment' => 'prod',
-            ]);
-
-        $project->forceFill([
-            'name' => 'harborlight',
-            'slug' => 'harborlight',
-            'default_environment' => 'prod',
-        ])->save();
+            ],
+        );
 
         $secondaryProject = $workspace->projects()->updateOrCreate(
             ['slug' => 'northwind'],
@@ -83,13 +75,27 @@ class DatabaseSeeder extends Seeder
             $this->seedApiKeys($demoProject, $source);
             $this->seedWebhooks($demoProject);
             $this->seedEmails($workspace, $demoProject, $source, $templates);
+            $this->inboxDemoSeeder->seed($demoProject);
         }
     }
 
     private function resetDemoData(Project $project): void
     {
-        $project->emails()->get()->each->delete();
+        $project->emails()->with('events')->each(function (Email $email): void {
+            if ($email->mime_path) {
+                Storage::disk($email->mime_disk)->delete($email->mime_path);
+            }
+
+            $email->events()->delete();
+            $email->delete();
+        });
+        $project->inboundEmails()->each(function (InboundEmail $email): void {
+            Storage::disk($email->mime_disk)->delete($email->mime_path);
+            $email->delete();
+        });
+        $project->threads()->delete();
         $project->webhookEndpoints()->get()->each->delete();
+        $project->apiKeys()->delete();
     }
 
     /**
@@ -259,26 +265,17 @@ class DatabaseSeeder extends Seeder
     private function seedApiKeys(Project $project, Source $source): void
     {
         foreach ([
-            ['Production - Harborlight', 'lsk_live_8f2a', 13],
-            ['Production - server-eu', 'lsk_live_aa01', 20],
-            ['Staging', 'lsk_test_3b14', 180],
-            ['Marketing - Mailmerge', 'lsk_live_cc41', 960],
-            ['CI - ephemeral', 'lsk_test_d011', 120],
-        ] as [$name, $prefix, $minutesAgo]) {
-            $project->apiKeys()->updateOrCreate(
-                ['prefix' => $prefix],
-                [
-                    'source_id' => $source->id,
-                    'name' => $name,
-                    'key_hash' => hash('sha256', $prefix.'_demo_secret_'.$project->id),
-                    'last_used_at' => now()->subMinutes($minutesAgo),
-                ],
-            );
+            ['Production - Harborlight', 13],
+            ['Production - server-eu', 20],
+            ['Staging', 180],
+            ['Marketing - Mailmerge', 960],
+            ['CI - ephemeral', 120],
+        ] as [$name, $minutesAgo]) {
+            $issued = ApiKey::issue($project, $name, $source);
+            $issued['api_key']->forceFill(['last_used_at' => now()->subMinutes($minutesAgo)])->save();
         }
 
-        if (! $project->apiKeys()->where('name', 'Development key')->exists()) {
-            ApiKey::issue($project, 'Development key', $source);
-        }
+        ApiKey::issue($project, 'Development key', $source);
     }
 
     private function seedWebhooks(Project $project): void

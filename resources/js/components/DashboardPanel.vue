@@ -180,7 +180,7 @@ function attentionTone(tone: string): string {
     <div class="grid max-w-7xl gap-5 pb-2">
         <section
             v-if="dashboard.attention.length"
-            class="rounded-xl border border-amber-200 bg-amber-50/60 p-4 dark:border-amber-500/20 dark:bg-amber-500/5"
+            class="rounded-xl border border-amber-200 bg-amber-50/60 p-3 sm:p-4 dark:border-amber-500/20 dark:bg-amber-500/5"
         >
             <div class="flex items-start gap-3">
                 <span
@@ -224,7 +224,7 @@ function attentionTone(tone: string): string {
                                         : undefined,
                                 )
                             "
-                            class="group flex items-center gap-3 rounded-lg border px-3 py-2.5 transition hover:-translate-y-0.5 hover:shadow-sm"
+                            class="group flex min-w-0 items-start gap-3 rounded-lg border px-3 py-2.5 transition hover:-translate-y-0.5 hover:shadow-sm"
                             :class="attentionTone(item.tone)"
                         >
                             <strong class="font-mono text-lg">{{
@@ -232,11 +232,11 @@ function attentionTone(tone: string): string {
                             }}</strong>
                             <span class="min-w-0 flex-1">
                                 <span
-                                    class="block truncate text-xs font-semibold"
+                                    class="block text-xs leading-5 font-semibold break-words"
                                     >{{ item.label }}</span
                                 >
                                 <span
-                                    class="mt-0.5 block truncate text-[11px] opacity-70"
+                                    class="mt-0.5 block text-[11px] leading-4 break-words opacity-70"
                                     >{{ item.description }}</span
                                 >
                             </span>
@@ -274,7 +274,7 @@ function attentionTone(tone: string): string {
                 v-for="metric in metrics"
                 :key="metric.label"
                 :href="metricUrl(metric)"
-                class="group min-w-0 border-r border-b border-zinc-200 p-4 transition hover:bg-zinc-50 sm:nth-[3n]:border-r-0 xl:border-b-0 xl:nth-[3n]:border-r xl:nth-[6n]:border-r-0 dark:border-[#25292d] dark:hover:bg-[#16191c]"
+                class="group min-w-0 border-r border-b border-zinc-200 p-3 transition hover:bg-zinc-50 sm:p-4 sm:nth-[3n]:border-r-0 xl:border-b-0 xl:nth-[3n]:border-r xl:nth-[6n]:border-r-0 dark:border-[#25292d] dark:hover:bg-[#16191c]"
             >
                 <div class="flex items-center justify-between gap-2">
                     <div
@@ -579,7 +579,7 @@ function attentionTone(tone: string): string {
                         v-for="email in recentOutbound"
                         :key="email.id"
                         :href="sectionUrl('outbound', { q: email.id })"
-                        class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-4 py-3 transition hover:bg-zinc-50 dark:hover:bg-[#16191c]"
+                        class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-3 py-3 transition sm:gap-4 sm:px-4 dark:hover:bg-[#16191c]"
                     >
                         <div class="min-w-0">
                             <div class="truncate text-sm font-medium">
@@ -591,7 +591,7 @@ function attentionTone(tone: string): string {
                                 {{ email.recipient || 'No recipient' }}
                             </div>
                         </div>
-                        <div class="text-right">
+                        <div class="min-w-0 text-right">
                             <span
                                 class="rounded-md px-2 py-1 font-mono text-[10px] uppercase"
                                 :class="statusTone(email.status)"
@@ -638,7 +638,7 @@ function attentionTone(tone: string): string {
                         :href="
                             sectionUrl('inbox', { thread: thread.public_id })
                         "
-                        class="grid grid-cols-[8px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 transition hover:bg-zinc-50 dark:hover:bg-[#16191c]"
+                        class="grid grid-cols-[8px_minmax(0,1fr)_auto] items-center gap-2 px-3 py-3 transition sm:gap-3 sm:px-4 dark:hover:bg-[#16191c]"
                     >
                         <span
                             class="size-2 rounded-full"

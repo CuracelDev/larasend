@@ -45,11 +45,46 @@ Larasend accepts API sends even when provider quota sync is stale or temporarily
 
 ## Requirements
 
-- Docker and Docker Compose for production-style installs.
+- Docker and Docker Compose for the bundled production-style stack.
 - PHP 8.4+ and Node.js 22+ for local development.
-- PostgreSQL 17+.
-- Redis 7+ if you use the bundled compose stack.
+- PostgreSQL 17+ and Redis 7+.
 - An Amazon SES account with a verified sending domain, or a Cloudflare account on the Workers Paid plan with a domain onboarded for Email Sending.
+
+## Laravel Cloud Deployment
+
+Larasend can run on Laravel Cloud, but it needs more than a web service. Provision PostgreSQL and Redis, then configure a queue worker for `php artisan queue:work --queue=default,webhooks --tries=3 --timeout=150` and a scheduler that runs `php artisan schedule:run` every minute. The worker delivers queued email and webhooks; the scheduler handles domain verification, quota refreshes, suppression sync, and retention work.
+
+Configure durable object storage for raw email MIME content. For an S3-compatible disk, set `FILESYSTEM_DISK=s3` and `LARASEND_MIME_DISK=s3`, then provide the appropriate `AWS_*` or S3-compatible disk credentials. Do not use a deployment's ephemeral local filesystem for `LARASEND_MIME_DISK`: queued delivery, inbound attachments, and email downloads depend on that content remaining available to every web and worker instance.
+
+Run database migrations as part of each deployment:
+
+```bash
+php artisan migrate --force
+```
+
+After the first deployment and after operational changes, run the health check from an environment with access to the production services:
+
+```bash
+php artisan larasend:doctor
+```
+
+Authentication email is deliberately separate from Larasend's transactional provider. The first installation owner and users created while control email is disabled remain accessible without verification. New-user verification, password recovery, and new-member invitations activate only after an administrator sets `LARASEND_CONTROL_MAILER` to a tested, independently configured mailer such as `smtp`, `ses`, `postmark`, or `resend`. `log`, `array`, and `larasend` are rejected as control mailers so the instance is never its own only recovery path.
+
+```env
+MAIL_MAILER=log
+LARASEND_CONTROL_MAILER=smtp
+MAIL_HOST=smtp.example.com
+MAIL_PORT=587
+MAIL_USERNAME=...
+MAIL_PASSWORD=...
+MAIL_FROM_ADDRESS=accounts@example.com
+```
+
+Leave `LARASEND_CONTROL_MAILER` blank until the dedicated mailer is tested. Workspace owners will see a dashboard warning, and invitations that would create an unreachable account are blocked. For emergency recovery, an administrator with shell access can verify an exact account explicitly:
+
+```bash
+php artisan larasend:verify-user owner@example.com --force
+```
 
 ## Quick Start With Docker
 
@@ -87,7 +122,7 @@ Paste the generated `base64:...` value into `APP_KEY` in `.env`, then start Lara
 docker compose up -d
 ```
 
-This starts everything Larasend needs: the web app (which runs migrations automatically on boot), the queue worker, the scheduler for background automation (DNS verification, quota refresh, suppression sync), PostgreSQL, and Redis.
+This starts everything Larasend needs: the web app (which runs migrations automatically on boot), the queue worker, the scheduler for background automation (DNS verification, quota refresh, suppression sync), PostgreSQL, and Redis. Its `.env` defaults use the Compose service names (`postgres` and `redis`) and its named storage volume is suitable for the bundled single-host setup.
 
 Open `APP_URL`, create the first user, and follow onboarding. To confirm the install is healthy:
 
@@ -264,9 +299,11 @@ $email = Larasend::emails()->send([
 
 ## Local Development
 
+Local development does not use the Docker service names by default. Before running Artisan or `composer run dev` on your host, point `.env` at reachable local PostgreSQL and Redis services (for example, `DB_HOST=127.0.0.1` and `REDIS_HOST=127.0.0.1`), and set the matching database credentials. Keep `FILESYSTEM_DISK=local` and `LARASEND_MIME_DISK=local` for disposable development data; use durable object storage only for production.
+
 ```bash
 composer install
-npm install
+npm ci
 cp .env.example .env
 php artisan key:generate
 php artisan migrate

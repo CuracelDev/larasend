@@ -355,7 +355,34 @@ it('only alerts for api keys that expire within the next seven days', function (
         );
 });
 
-it('allows production instance role sources to open the send page', function () {
+it('warns workspace owners until dedicated control mail is configured', function () {
+    $user = User::factory()->create();
+    seedActivityDashboardData($user);
+
+    $this->actingAs($user)
+        ->get('/activity')
+        ->assertSuccessful()
+        ->assertInertia(fn ($page) => $page
+            ->where('controlMail.configured', false)
+            ->where('dashboard.attention', fn ($attention) => collect($attention)->contains(
+                fn (array $item): bool => $item['key'] === 'control-mail' && $item['count'] === 1,
+            ))
+        );
+
+    config(['larasend.control_mailer' => 'smtp']);
+
+    $this->actingAs($user)
+        ->get('/activity')
+        ->assertSuccessful()
+        ->assertInertia(fn ($page) => $page
+            ->where('controlMail.configured', true)
+            ->where('dashboard.attention', fn ($attention) => collect($attention)->doesntContain(
+                fn (array $item): bool => $item['key'] === 'control-mail',
+            ))
+        );
+});
+
+it('allows explicitly configured instance role sources to open the send page', function () {
     $user = User::factory()->create();
     $project = seedActivityDashboardData($user);
 
@@ -368,23 +395,28 @@ it('allows production instance role sources to open the send page', function () 
         'last_quota_checked_at' => now(),
     ])->save();
 
-    $this->app->detectEnvironment(fn () => 'production');
+    Http::fake([
+        'http://169.254.169.254/latest/api/token' => Http::response('imdsv2-token'),
+        'http://169.254.169.254/latest/meta-data/iam/security-credentials/' => Http::response('larasend-role'),
+        'http://169.254.169.254/latest/meta-data/iam/security-credentials/larasend-role' => Http::response([
+            'AccessKeyId' => 'instance-access-key',
+            'SecretAccessKey' => 'instance-secret-key',
+            'Token' => 'instance-session-token',
+        ]),
+    ]);
+
     $this->withoutVite();
 
-    try {
-        $this->actingAs($user)
-            ->get('/send')
-            ->assertSuccessful()
-            ->assertInertia(fn ($page) => $page
-                ->component('Activity')
-                ->where('section', 'send')
-                ->where('source.has_aws_credentials', false)
-                ->where('source.uses_instance_role', true)
-                ->where('source.can_send', true)
-            );
-    } finally {
-        $this->app->detectEnvironment(fn () => 'testing');
-    }
+    $this->actingAs($user)
+        ->get('/send')
+        ->assertSuccessful()
+        ->assertInertia(fn ($page) => $page
+            ->component('Activity')
+            ->where('section', 'send')
+            ->where('source.has_aws_credentials', false)
+            ->where('source.uses_instance_role', true)
+            ->where('source.can_send', true)
+        );
 });
 
 it('renders identities as selectable identity records with dns payloads', function () {

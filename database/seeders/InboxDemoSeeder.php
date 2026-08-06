@@ -12,24 +12,33 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 /**
- * Seeds a handful of realistic conversations into the first project so the
- * team inbox can be demoed without waiting for real inbound mail.
+ * Seeds realistic conversations into the Larasend demo projects so the team
+ * inbox can be demonstrated without waiting for real inbound mail.
  *
  * Run with: php artisan db:seed --class=InboxDemoSeeder
  */
 class InboxDemoSeeder extends Seeder
 {
+    public function __construct(private ThreadResolver $resolver) {}
+
     public function run(): void
     {
-        $project = Project::query()->orderBy('id')->first();
+        $projects = Project::query()
+            ->whereHas('workspace', fn ($query) => $query->where('slug', 'larasend-demo'))
+            ->orderBy('id')
+            ->get();
 
-        if (! $project) {
-            $this->command?->warn('No project found — run the main seeder first.');
+        if ($projects->isEmpty()) {
+            $this->command?->warn('No Larasend demo project found — run the main seeder first.');
 
             return;
         }
 
-        $resolver = app(ThreadResolver::class);
+        $projects->each(fn (Project $project) => $this->seed($project));
+    }
+
+    public function seed(Project $project): void
+    {
         $owner = $project->workspace->users()->first();
         $inboxAddress = 'support@'.($project->domains()->value('domain') ?: 'example.com');
 
@@ -70,7 +79,7 @@ class InboxDemoSeeder extends Seeder
                 if ($message['direction'] === 'in') {
                     $lastInbound = $this->receiveInbound(
                         $project,
-                        $resolver,
+                        $this->resolver,
                         fromEmail: $fromEmail,
                         fromName: $fromName,
                         to: $inboxAddress,
@@ -82,7 +91,7 @@ class InboxDemoSeeder extends Seeder
                 } else {
                     $this->sendOutbound(
                         $project,
-                        $resolver,
+                        $this->resolver,
                         from: $inboxAddress,
                         to: $fromEmail,
                         subject: 'Re: '.$conversation['subject'],

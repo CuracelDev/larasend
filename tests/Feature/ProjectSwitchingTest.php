@@ -131,6 +131,22 @@ it('allows workspace owners to rename projects', function () {
         ->slug->toBe('harborlight-mail');
 });
 
+it('allows members with project management capability to rename projects', function () {
+    [$owner, $primary] = projectSwitchingFixture();
+    $member = User::factory()->create();
+    $primary->workspace->users()->attach($member, ['role' => 'member']);
+
+    $this->actingAs($member)
+        ->put("/projects/{$primary->slug}", [
+            'name' => 'Member Managed',
+            'slug' => 'member-managed',
+        ])
+        ->assertRedirect('/projects/member-managed/projects');
+
+    expect($primary->fresh()->name)->toBe('Member Managed')
+        ->and($owner)->toBeInstanceOf(User::class);
+});
+
 it('archives active projects without deleting email history', function () {
     [$user, $primary, $secondary] = projectSwitchingFixture();
 

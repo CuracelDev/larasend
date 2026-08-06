@@ -7,6 +7,7 @@ import {
     Check,
     Cloud,
     Copy,
+    Crown,
     Inbox,
     KeyRound,
     Pencil,
@@ -29,6 +30,7 @@ import DashboardPanel from '@/components/DashboardPanel.vue';
 import EmailProviderPanel from '@/components/EmailProviderPanel.vue';
 import GlobalRail from '@/components/GlobalRail.vue';
 import { Toaster } from '@/components/ui/sonner';
+import { transfer as transferWorkspaceOwnershipRoute } from '@/routes/workspace-members/ownership';
 
 type Metric = {
     label: string;
@@ -561,6 +563,9 @@ const workspaceRoleOptions: {
         description: 'Full workspace administration.',
     },
 ];
+const assignableWorkspaceRoleOptions = workspaceRoleOptions.filter(
+    (role) => role.value !== 'owner',
+);
 
 const apiKeyScopeOptions: { value: ApiKeyScope; label: string }[] = [
     { value: 'send', label: 'Send email' },
@@ -1475,6 +1480,24 @@ function removeWorkspaceMember(memberId: number): void {
     });
 }
 
+function transferWorkspaceOwnership(
+    member: (typeof props.workspaceMembers)[number],
+): void {
+    openConfirmation({
+        title: `Transfer ownership to ${member.name}?`,
+        body: `This gives ${member.email} full ownership of ${props.workspace.name}. Your role will change to Member, and only the new owner can transfer ownership again.`,
+        actionLabel: 'Transfer ownership',
+        tone: 'warning',
+        onConfirm: () => {
+            router.patch(
+                transferWorkspaceOwnershipRoute.url(member.id),
+                {},
+                { preserveScroll: true },
+            );
+        },
+    });
+}
+
 function openConfirmation(state: Exclude<ConfirmationState, null>): void {
     confirmation.value = state;
 }
@@ -1862,7 +1885,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                     </span>
                 </div>
                 <section
-                    class="flex min-h-14 shrink-0 items-center gap-2.5 border-b border-zinc-200 px-4 dark:border-[#1d2125]"
+                    class="flex min-h-14 shrink-0 flex-wrap items-center gap-2.5 border-b border-zinc-200 px-3 py-2 sm:flex-nowrap sm:px-4 sm:py-0 dark:border-[#1d2125]"
                 >
                     <div class="flex items-center gap-3">
                         <h1
@@ -1895,17 +1918,62 @@ function recipientTitle(email: EmailRow): string | undefined {
                             {{ range }}
                         </button>
                     </div>
+                    <label
+                        v-if="showRangeControls"
+                        class="ml-auto flex h-8 items-center rounded-lg border border-zinc-200 bg-white px-2 text-xs md:hidden dark:border-[#1d2125] dark:bg-[#111315]"
+                    >
+                        <span class="sr-only">Date range</span>
+                        <select
+                            v-model="selectedRange"
+                            class="bg-transparent font-medium text-zinc-600 outline-none dark:text-zinc-300"
+                            aria-label="Date range"
+                            @change="setRange(selectedRange)"
+                        >
+                            <option
+                                v-for="range in [
+                                    '1h',
+                                    '24h',
+                                    '7d',
+                                    '14d',
+                                    '30d',
+                                ]"
+                                :key="`mobile-${range}`"
+                                :value="range"
+                            >
+                                {{ range }}
+                            </option>
+                        </select>
+                    </label>
                     <a
                         v-if="isMailSection"
                         :href="exportHref"
                         class="inline-flex h-7 items-center gap-1.5 rounded-md px-2 font-sans text-[12px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-950 dark:text-[#9aa0a6] dark:hover:bg-[#16191c] dark:hover:text-zinc-100"
                         >Export</a
                     >
+                    <form
+                        v-if="isMailSection"
+                        class="order-last flex h-9 w-full items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 text-[13px] text-zinc-500 sm:hidden dark:border-[#1d2125] dark:bg-[#111315] dark:text-[#9aa0a6]"
+                        @submit.prevent="applySearch"
+                    >
+                        <Search class="size-3.5 shrink-0" />
+                        <input
+                            v-model="searchQuery"
+                            class="min-w-0 flex-1 bg-transparent outline-none placeholder:text-zinc-400 dark:placeholder:text-[#6c7177]"
+                            placeholder="Search outbound activity..."
+                            aria-label="Search outbound activity"
+                        />
+                        <button
+                            type="submit"
+                            class="shrink-0 rounded-md bg-zinc-100 px-2 py-1 text-xs font-semibold text-zinc-700 dark:bg-[#1a1e22] dark:text-zinc-200"
+                        >
+                            Search
+                        </button>
+                    </form>
                 </section>
 
                 <div
                     v-if="section === 'activity' && dashboard"
-                    class="min-h-0 flex-1 overflow-auto p-5"
+                    class="min-h-0 flex-1 overflow-auto p-3 sm:p-5"
                 >
                     <DashboardPanel
                         :project-slug="project.slug"
@@ -2223,26 +2291,32 @@ function recipientTitle(email: EmailRow): string | undefined {
                         class="flex min-h-0 min-w-0 flex-col overflow-hidden border-r border-zinc-200 dark:border-[#1d2125]"
                     >
                         <div
-                            class="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-zinc-200 px-3.5 py-2.5 dark:border-[#1d2125]"
+                            class="flex shrink-0 items-center gap-2 border-b border-zinc-200 px-3.5 py-2.5 dark:border-[#1d2125]"
                         >
-                            <button
-                                v-for="filter in statusFilters"
-                                :key="filter"
-                                class="inline-flex h-[26px] items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-2.5 font-sans text-[11.5px] text-zinc-500 hover:text-zinc-950 dark:border-[#1d2125] dark:bg-[#111315] dark:text-[#9aa0a6] dark:hover:text-zinc-100"
-                                :class="{
-                                    'border-zinc-300 bg-zinc-100 text-zinc-950 dark:border-[#262b30] dark:bg-[#1a1e22] dark:text-zinc-100':
-                                        selectedFilter === filter,
-                                }"
-                                @click="selectedFilter = filter"
+                            <div
+                                class="flex min-w-0 flex-1 gap-2 overflow-x-auto"
                             >
-                                {{ filter }}
-                                <span
-                                    class="border-l border-zinc-200 pl-1.5 font-mono text-[10.5px] text-zinc-500 dark:border-[#262b30] dark:text-[#6c7177]"
-                                    >{{ statusFilterCounts[filter] ?? 0 }}</span
+                                <button
+                                    v-for="filter in statusFilters"
+                                    :key="filter"
+                                    class="inline-flex h-[26px] shrink-0 items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-2.5 font-sans text-[11.5px] text-zinc-500 hover:text-zinc-950 dark:border-[#1d2125] dark:bg-[#111315] dark:text-[#9aa0a6] dark:hover:text-zinc-100"
+                                    :class="{
+                                        'border-zinc-300 bg-zinc-100 text-zinc-950 dark:border-[#262b30] dark:bg-[#1a1e22] dark:text-zinc-100':
+                                            selectedFilter === filter,
+                                    }"
+                                    @click="selectedFilter = filter"
                                 >
-                            </button>
+                                    {{ filter }}
+                                    <span
+                                        class="border-l border-zinc-200 pl-1.5 font-mono text-[10.5px] text-zinc-500 dark:border-[#262b30] dark:text-[#6c7177]"
+                                        >{{
+                                            statusFilterCounts[filter] ?? 0
+                                        }}</span
+                                    >
+                                </button>
+                            </div>
                             <button
-                                class="ml-auto inline-flex h-[26px] items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-2.5 font-sans text-[11.5px] text-zinc-500 hover:text-zinc-950 dark:border-[#1d2125] dark:bg-[#111315] dark:text-[#9aa0a6] dark:hover:text-zinc-100"
+                                class="inline-flex h-[26px] shrink-0 items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-2.5 font-sans text-[11.5px] text-zinc-500 hover:text-zinc-950 dark:border-[#1d2125] dark:bg-[#111315] dark:text-[#9aa0a6] dark:hover:text-zinc-100"
                                 @click="
                                     selectedFilter = 'All';
                                     searchQuery = '';
@@ -2617,7 +2691,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                 >
                     <div v-if="section === 'projects'" class="grid gap-4">
                         <div
-                            class="flex max-w-6xl items-start justify-between gap-4"
+                            class="flex max-w-6xl flex-col items-start justify-between gap-4 sm:flex-row"
                         >
                             <div>
                                 <h2 class="text-lg font-semibold">Workspace</h2>
@@ -2629,7 +2703,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                             </div>
                             <button
                                 type="button"
-                                class="rounded-lg bg-teal-300 px-3 py-2 text-sm font-bold text-zinc-950"
+                                class="w-full rounded-lg bg-teal-300 px-3 py-2 text-sm font-bold text-zinc-950 sm:w-auto"
                                 @click="showProjectForm = true"
                             >
                                 + New project
@@ -2874,12 +2948,12 @@ function recipientTitle(email: EmailRow): string | undefined {
                                 </button>
                                 <div
                                     v-if="showingArchivedProjects"
-                                    class="border-t border-zinc-200 dark:border-[#1d2125]"
+                                    class="overflow-x-auto border-t border-zinc-200 dark:border-[#1d2125]"
                                 >
                                     <div
                                         v-for="item in archivedProjects"
                                         :key="item.slug"
-                                        class="grid min-h-12 grid-cols-[minmax(280px,1fr)_120px_120px_120px_130px] items-center gap-2 border-b border-zinc-200 px-3 py-2 text-sm last:border-b-0 dark:border-[#16191c]"
+                                        class="grid min-h-12 min-w-[760px] grid-cols-[minmax(280px,1fr)_120px_120px_120px_130px] items-center gap-2 border-b border-zinc-200 px-3 py-2 text-sm last:border-b-0 dark:border-[#16191c]"
                                     >
                                         <div class="min-w-0">
                                             <div class="truncate font-semibold">
@@ -2955,11 +3029,18 @@ function recipientTitle(email: EmailRow): string | undefined {
 
                             <form
                                 v-if="workspace.can_manage_members"
-                                class="grid grid-cols-[minmax(220px,1fr)_220px_auto] gap-2 rounded-lg border border-zinc-200 bg-white p-3 dark:border-[#1d2125] dark:bg-[#101111]"
+                                class="grid grid-cols-1 gap-2 rounded-lg border border-zinc-200 bg-white p-3 md:grid-cols-[minmax(220px,1fr)_220px_auto] dark:border-[#1d2125] dark:bg-[#101111]"
                                 @submit.prevent="addWorkspaceMember"
                             >
                                 <div class="min-w-0">
+                                    <label
+                                        for="workspace-member-email"
+                                        class="mb-1.5 block text-xs font-medium text-zinc-500 dark:text-zinc-400"
+                                    >
+                                        Email address
+                                    </label>
                                     <input
+                                        id="workspace-member-email"
                                         v-model="workspaceMemberForm.email"
                                         type="email"
                                         required
@@ -2979,7 +3060,14 @@ function recipientTitle(email: EmailRow): string | undefined {
                                     </p>
                                 </div>
                                 <div>
+                                    <label
+                                        for="workspace-member-role"
+                                        class="mb-1.5 block text-xs font-medium text-zinc-500 dark:text-zinc-400"
+                                    >
+                                        Role
+                                    </label>
                                     <select
+                                        id="workspace-member-role"
                                         v-model="workspaceMemberForm.role"
                                         class="w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-800 dark:bg-[#101111]"
                                         :class="{
@@ -2988,7 +3076,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                         }"
                                     >
                                         <option
-                                            v-for="role in workspaceRoleOptions"
+                                            v-for="role in assignableWorkspaceRoleOptions"
                                             :key="role.value"
                                             :value="role.value"
                                         >
@@ -3004,7 +3092,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                 </div>
                                 <button
                                     type="submit"
-                                    class="h-9 rounded-lg bg-teal-300 px-4 text-sm font-bold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60"
+                                    class="h-9 self-end rounded-lg bg-teal-300 px-4 text-sm font-bold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60"
                                     :disabled="workspaceMemberForm.processing"
                                 >
                                     {{
@@ -3016,10 +3104,10 @@ function recipientTitle(email: EmailRow): string | undefined {
                             </form>
 
                             <div
-                                class="grid overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-[#1d2125] dark:bg-[#101111]"
+                                class="grid overflow-x-auto rounded-lg border border-zinc-200 bg-white dark:border-[#1d2125] dark:bg-[#101111]"
                             >
                                 <div
-                                    class="grid grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_220px_52px] border-b border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-[11px] tracking-widest text-zinc-500 uppercase dark:border-[#1d2125] dark:bg-[#111315]"
+                                    class="grid min-w-[800px] grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_220px_92px] border-b border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-[11px] tracking-widest text-zinc-500 uppercase dark:border-[#1d2125] dark:bg-[#111315]"
                                 >
                                     <div>Name</div>
                                     <div>Email</div>
@@ -3029,7 +3117,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                 <div
                                     v-for="member in workspaceMembers"
                                     :key="member.id"
-                                    class="grid min-h-12 grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_220px_52px] items-center border-b border-zinc-200 px-3 text-sm last:border-b-0 dark:border-[#16191c]"
+                                    class="grid min-h-12 min-w-[800px] grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_220px_92px] items-center border-b border-zinc-200 px-3 text-sm last:border-b-0 dark:border-[#16191c]"
                                 >
                                     <div class="min-w-0">
                                         <div
@@ -3065,7 +3153,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                             "
                                         >
                                             <option
-                                                v-for="role in workspaceRoleOptions"
+                                                v-for="role in assignableWorkspaceRoleOptions"
                                                 :key="`${member.id}-${role.value}`"
                                                 :value="role.value"
                                             >
@@ -3079,7 +3167,26 @@ function recipientTitle(email: EmailRow): string | undefined {
                                             {{ roleLabel(member.role) }}
                                         </span>
                                     </div>
-                                    <div class="text-right">
+                                    <div
+                                        class="flex items-center justify-end gap-1"
+                                    >
+                                        <button
+                                            v-if="
+                                                workspace.can_manage_members &&
+                                                !member.is_owner
+                                            "
+                                            type="button"
+                                            class="inline-flex size-8 items-center justify-center rounded-md text-zinc-500 hover:bg-amber-50 hover:text-amber-700 dark:hover:bg-amber-500/10 dark:hover:text-amber-300"
+                                            :aria-label="`Transfer workspace ownership to ${member.name}`"
+                                            :title="`Transfer workspace ownership to ${member.name}`"
+                                            @click="
+                                                transferWorkspaceOwnership(
+                                                    member,
+                                                )
+                                            "
+                                        >
+                                            <Crown class="size-4" />
+                                        </button>
                                         <button
                                             v-if="
                                                 workspace.can_manage_members &&
@@ -3389,10 +3496,10 @@ function recipientTitle(email: EmailRow): string | undefined {
 
                     <div
                         v-else-if="section === 'identities'"
-                        class="-m-5 grid min-h-full grid-cols-[340px_minmax(0,1fr)] border-t border-zinc-200 dark:border-zinc-800"
+                        class="-m-4 grid min-h-full grid-cols-1 border-t border-zinc-200 lg:-m-5 lg:grid-cols-[340px_minmax(0,1fr)] dark:border-zinc-800"
                     >
                         <aside
-                            class="border-r border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-[#090a0a]"
+                            class="max-h-[46vh] overflow-y-auto border-b border-zinc-200 bg-zinc-50 lg:max-h-none lg:overflow-visible lg:border-r lg:border-b-0 dark:border-zinc-800 dark:bg-[#090a0a]"
                         >
                             <div
                                 class="flex items-center justify-between border-b border-zinc-200 px-3 py-2.5 dark:border-zinc-800"
@@ -3511,13 +3618,17 @@ function recipientTitle(email: EmailRow): string | undefined {
 
                         <section
                             v-if="selectedIdentity"
-                            class="min-w-0 overflow-auto p-5 font-sans"
+                            class="min-w-0 overflow-auto p-4 font-sans sm:p-5"
                         >
-                            <div class="flex items-start gap-4">
-                                <div>
-                                    <div class="flex items-center gap-3">
+                            <div
+                                class="flex flex-col items-start gap-4 sm:flex-row"
+                            >
+                                <div class="min-w-0">
+                                    <div
+                                        class="flex min-w-0 flex-wrap items-center gap-3"
+                                    >
                                         <h2
-                                            class="text-xl font-semibold tracking-tight"
+                                            class="min-w-0 text-xl font-semibold tracking-tight break-all"
                                         >
                                             {{ selectedIdentity.domain }}
                                         </h2>
@@ -3547,7 +3658,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                     </div>
                                 </div>
                                 <div
-                                    class="ml-auto flex flex-wrap justify-end gap-2"
+                                    class="flex w-full flex-wrap justify-start gap-2 sm:ml-auto sm:w-auto sm:justify-end"
                                 >
                                     <button
                                         v-if="workspace.can_manage_domains"
@@ -3603,7 +3714,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                             </div>
 
                             <div
-                                class="mt-4 grid grid-cols-4 overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800"
+                                class="mt-4 grid grid-cols-2 overflow-hidden rounded-lg border border-zinc-200 sm:grid-cols-4 dark:border-zinc-800"
                             >
                                 <div
                                     v-for="stat in identityStats"
@@ -3626,7 +3737,9 @@ function recipientTitle(email: EmailRow): string | undefined {
                                 <p class="mt-1 text-sm text-zinc-500">
                                     DKIM, SPF, and DMARC alignment
                                 </p>
-                                <div class="mt-4 grid grid-cols-3 gap-3">
+                                <div
+                                    class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3"
+                                >
                                     <div
                                         v-for="label in [
                                             'DKIM',
@@ -3720,7 +3833,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                             </div>
 
                             <div class="mt-5">
-                                <div class="flex items-center">
+                                <div class="flex flex-wrap items-center gap-3">
                                     <div>
                                         <h3 class="font-semibold">
                                             DNS records
@@ -3731,7 +3844,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                         </p>
                                     </div>
                                     <button
-                                        class="ml-auto inline-flex items-center gap-2 rounded-lg border border-zinc-200 px-3 py-2 text-sm font-semibold text-zinc-600 transition hover:text-zinc-950 active:scale-[0.98] dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
+                                        class="ml-auto inline-flex shrink-0 items-center gap-2 rounded-lg border border-zinc-200 px-3 py-2 text-sm font-semibold text-zinc-600 transition hover:text-zinc-950 active:scale-[0.98] dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
                                         @click="copyAllDns"
                                     >
                                         <Check
@@ -3747,10 +3860,10 @@ function recipientTitle(email: EmailRow): string | undefined {
                                     </button>
                                 </div>
                                 <div
-                                    class="mt-4 overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800"
+                                    class="mt-4 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800"
                                 >
                                     <div
-                                        class="grid grid-cols-[90px_90px_minmax(220px,1fr)_40px_minmax(260px,1.2fr)_40px] border-b border-zinc-200 bg-zinc-50 px-3 py-2.5 font-mono text-xs tracking-widest text-zinc-500 uppercase dark:border-zinc-800 dark:bg-zinc-950"
+                                        class="grid min-w-[760px] grid-cols-[90px_90px_minmax(220px,1fr)_40px_minmax(260px,1.2fr)_40px] border-b border-zinc-200 bg-zinc-50 px-3 py-2.5 font-mono text-xs tracking-widest text-zinc-500 uppercase dark:border-zinc-800 dark:bg-zinc-950"
                                     >
                                         <div>Status</div>
                                         <div>Type</div>
@@ -3762,7 +3875,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                     <div
                                         v-for="record in selectedIdentityRecords"
                                         :key="`${record.type}-${record.name}`"
-                                        class="grid grid-cols-[90px_90px_minmax(220px,1fr)_40px_minmax(260px,1.2fr)_40px] items-center border-b border-zinc-200 px-3 py-3 font-mono text-sm last:border-b-0 dark:border-zinc-900"
+                                        class="grid min-w-[760px] grid-cols-[90px_90px_minmax(220px,1fr)_40px_minmax(260px,1.2fr)_40px] items-center border-b border-zinc-200 px-3 py-3 font-mono text-sm last:border-b-0 dark:border-zinc-900"
                                     >
                                         <div>
                                             <span
@@ -3989,7 +4102,7 @@ function recipientTitle(email: EmailRow): string | undefined {
 
                     <div v-else-if="section === 'templates'" class="grid gap-4">
                         <section
-                            class="grid grid-cols-4 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-[#1d2125] dark:bg-[#111315]"
+                            class="grid grid-cols-2 overflow-hidden rounded-lg border border-zinc-200 sm:grid-cols-4 dark:border-[#1d2125] dark:bg-[#111315]"
                         >
                             <div
                                 v-for="stat in templateStats"
@@ -4016,8 +4129,8 @@ function recipientTitle(email: EmailRow): string | undefined {
                             class="grid gap-3 rounded-lg border border-zinc-200 bg-white p-3 dark:border-[#1d2125] dark:bg-[#111315]"
                             @submit.prevent="saveTemplate"
                         >
-                            <div class="flex items-center gap-3">
-                                <div>
+                            <div class="flex flex-wrap items-center gap-3">
+                                <div class="min-w-0 flex-1 basis-60">
                                     <h2 class="text-base font-semibold">
                                         Create or update template
                                     </h2>
@@ -4027,12 +4140,12 @@ function recipientTitle(email: EmailRow): string | undefined {
                                     </p>
                                 </div>
                                 <button
-                                    class="ml-auto rounded-lg bg-teal-400 px-3 py-2 text-[12px] font-bold text-zinc-950"
+                                    class="ml-auto w-full rounded-lg bg-teal-400 px-3 py-2 text-[12px] font-bold text-zinc-950 sm:w-auto"
                                 >
                                     Save template
                                 </button>
                             </div>
-                            <div class="grid grid-cols-3 gap-3">
+                            <div class="grid grid-cols-1 gap-3 md:grid-cols-3">
                                 <label class="grid gap-1.5 text-[12px]">
                                     <span class="text-zinc-500">Slug</span>
                                     <input
@@ -4067,7 +4180,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                     required
                                 />
                             </label>
-                            <div class="grid grid-cols-2 gap-3">
+                            <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
                                 <label class="grid gap-1.5 text-[12px]">
                                     <span class="text-zinc-500">HTML</span>
                                     <textarea
@@ -4088,7 +4201,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                             class="overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-[#1d2125] dark:bg-[#0b0c0d]"
                         >
                             <div
-                                class="grid grid-cols-[260px_minmax(360px,1fr)_180px_90px] border-b border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-[11px] tracking-widest text-zinc-500 uppercase dark:border-[#1d2125] dark:bg-[#111315]"
+                                class="hidden grid-cols-[260px_minmax(360px,1fr)_180px_90px] border-b border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-[11px] tracking-widest text-zinc-500 uppercase md:grid dark:border-[#1d2125] dark:bg-[#111315]"
                             >
                                 <div>Template</div>
                                 <div>Subject</div>
@@ -4098,7 +4211,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                             <button
                                 v-for="template in templates"
                                 :key="template.slug"
-                                class="grid h-12 w-full grid-cols-[260px_minmax(360px,1fr)_180px_90px] items-center border-b border-zinc-200 px-3 text-left text-[13px] last:border-b-0 hover:bg-zinc-50 dark:border-[#16191c] dark:hover:bg-[#111315]"
+                                class="grid min-h-12 w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-b border-zinc-200 px-3 py-3 text-left text-[13px] last:border-b-0 hover:bg-zinc-50 md:grid-cols-[260px_minmax(360px,1fr)_180px_90px] md:py-0 dark:border-[#16191c] dark:hover:bg-[#111315]"
                                 @click="
                                     templateForm.slug = template.slug;
                                     templateForm.name = template.name;
@@ -4123,7 +4236,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                     </div>
                                 </div>
                                 <div
-                                    class="truncate text-zinc-600 dark:text-zinc-300"
+                                    class="col-span-2 truncate text-zinc-600 md:col-span-1 dark:text-zinc-300"
                                 >
                                     {{ template.subject }}
                                 </div>
@@ -4139,7 +4252,7 @@ function recipientTitle(email: EmailRow): string | undefined {
 
                     <div v-else-if="section === 'webhooks'" class="grid gap-4">
                         <section
-                            class="grid grid-cols-4 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-[#101111]"
+                            class="grid grid-cols-2 overflow-hidden rounded-lg border border-zinc-200 sm:grid-cols-4 dark:border-zinc-800 dark:bg-[#101111]"
                         >
                             <div
                                 v-for="stat in webhookStats"
@@ -4175,9 +4288,9 @@ function recipientTitle(email: EmailRow): string | undefined {
                             class="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-[#090a0a]"
                         >
                             <div
-                                class="flex items-center gap-3 border-b border-zinc-200 px-3 py-2.5 dark:border-zinc-800"
+                                class="flex flex-wrap items-center gap-2 border-b border-zinc-200 px-3 py-2.5 sm:gap-3 dark:border-zinc-800"
                             >
-                                <div>
+                                <div class="w-full min-w-0 sm:w-auto sm:flex-1">
                                     <h2
                                         class="font-sans text-base font-semibold"
                                     >
@@ -4191,7 +4304,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                     </p>
                                 </div>
                                 <button
-                                    class="ml-auto inline-flex items-center gap-2 rounded-lg border border-zinc-200 px-3 py-2 font-sans text-sm font-semibold text-zinc-600 hover:text-zinc-950 dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
+                                    class="inline-flex flex-1 items-center justify-center gap-2 rounded-lg border border-zinc-200 px-3 py-2 font-sans text-sm font-semibold text-zinc-600 hover:text-zinc-950 sm:ml-auto sm:flex-none dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
                                     @click="
                                         showWebhookDeliveries =
                                             !showWebhookDeliveries
@@ -4205,7 +4318,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                     }}
                                 </button>
                                 <button
-                                    class="rounded-lg bg-teal-400 px-3 py-2 font-sans text-sm font-bold text-zinc-950"
+                                    class="flex-1 rounded-lg bg-teal-400 px-3 py-2 font-sans text-sm font-bold text-zinc-950 sm:flex-none"
                                     @click="resetWebhookForm"
                                 >
                                     + Add endpoint
@@ -4218,7 +4331,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                 @submit.prevent="saveWebhookEndpoint"
                             >
                                 <div
-                                    class="grid grid-cols-[minmax(320px,1fr)_140px] gap-4"
+                                    class="grid grid-cols-1 gap-4 sm:grid-cols-[minmax(320px,1fr)_140px]"
                                 >
                                     <label class="grid gap-2 text-sm">
                                         <span class="text-zinc-500"
@@ -4293,7 +4406,103 @@ function recipientTitle(email: EmailRow): string | undefined {
                             </form>
 
                             <div
-                                class="grid min-w-[980px] grid-cols-[32px_minmax(300px,1.3fr)_minmax(280px,1fr)_120px_120px_120px_150px] border-b border-zinc-200 bg-zinc-50 px-3 py-2.5 font-mono text-xs tracking-widest text-zinc-500 uppercase dark:border-zinc-800 dark:bg-[#101111]"
+                                class="divide-y divide-zinc-200 xl:hidden dark:divide-zinc-900"
+                            >
+                                <article
+                                    v-for="webhook in webhooks"
+                                    :key="`mobile-${webhook.id}`"
+                                    class="grid min-w-0 gap-3 p-3 font-sans text-sm"
+                                >
+                                    <div class="flex min-w-0 items-start gap-2">
+                                        <span
+                                            class="mt-1.5 size-2.5 shrink-0 rounded-full"
+                                            :class="
+                                                webhook.status === 'healthy'
+                                                    ? 'bg-emerald-400'
+                                                    : webhook.status ===
+                                                        'failing'
+                                                      ? 'bg-red-400'
+                                                      : 'bg-zinc-500'
+                                            "
+                                        />
+                                        <div class="min-w-0 flex-1">
+                                            <div
+                                                class="font-mono text-xs font-medium break-all"
+                                            >
+                                                {{ webhook.url }}
+                                            </div>
+                                            <div
+                                                class="mt-1 flex flex-wrap items-center gap-1 font-mono text-[10px] text-zinc-500"
+                                            >
+                                                <span>{{ webhook.id }}</span>
+                                                <span
+                                                    >· secret
+                                                    {{
+                                                        webhook.secret_prefix
+                                                    }}...</span
+                                                >
+                                                <button
+                                                    class="rounded p-1 hover:bg-zinc-100 hover:text-zinc-950 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                                                    title="Copy endpoint URL"
+                                                    @click="
+                                                        copyText(webhook.url)
+                                                    "
+                                                >
+                                                    <Copy class="size-3.5" />
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <span
+                                            class="shrink-0 rounded-md px-2 py-1 font-mono text-[10px]"
+                                            :class="
+                                                webhook.status === 'healthy'
+                                                    ? 'bg-emerald-500/12 text-emerald-400'
+                                                    : webhook.status ===
+                                                        'failing'
+                                                      ? 'bg-red-500/12 text-red-400'
+                                                      : 'bg-zinc-500/12 text-zinc-400'
+                                            "
+                                            >{{ webhook.status }}</span
+                                        >
+                                    </div>
+                                    <div class="flex flex-wrap gap-1.5">
+                                        <span
+                                            v-for="event in webhook.events"
+                                            :key="`mobile-${webhook.id}-${event}`"
+                                            class="rounded bg-zinc-100 px-2 py-1 font-mono text-[10px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                                            >{{ event }}</span
+                                        >
+                                    </div>
+                                    <div
+                                        class="grid grid-cols-2 gap-2 rounded-lg bg-zinc-50 p-2 text-xs dark:bg-[#101111]"
+                                    >
+                                        <div>
+                                            <span class="text-zinc-500"
+                                                >Success</span
+                                            >
+                                            <div class="mt-0.5 font-mono">
+                                                {{ webhook.success_rate }}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <span class="text-zinc-500"
+                                                >Last delivery</span
+                                            >
+                                            <div class="mt-0.5">
+                                                {{ webhook.last_delivered_at }}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <button
+                                        class="justify-self-start rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-semibold text-zinc-600 hover:text-zinc-950 dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
+                                        @click="editWebhook(webhook)"
+                                    >
+                                        Edit endpoint
+                                    </button>
+                                </article>
+                            </div>
+                            <div
+                                class="hidden min-w-[980px] grid-cols-[32px_minmax(300px,1.3fr)_minmax(280px,1fr)_120px_120px_120px_150px] border-b border-zinc-200 bg-zinc-50 px-3 py-2.5 font-mono text-xs tracking-widest text-zinc-500 uppercase xl:grid dark:border-zinc-800 dark:bg-[#101111]"
                             >
                                 <div></div>
                                 <div>URL</div>
@@ -4303,7 +4512,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                 <div>Last</div>
                                 <div></div>
                             </div>
-                            <div class="overflow-auto">
+                            <div class="hidden overflow-auto xl:block">
                                 <div
                                     v-for="webhook in webhooks"
                                     :key="webhook.id"
@@ -4392,8 +4601,8 @@ function recipientTitle(email: EmailRow): string | undefined {
                             v-if="sesWebhookUrl"
                             class="rounded-lg border border-zinc-200 bg-white p-4 font-sans dark:border-zinc-800 dark:bg-[#090a0a]"
                         >
-                            <div class="flex items-center gap-3">
-                                <div>
+                            <div class="flex flex-wrap items-center gap-3">
+                                <div class="min-w-0 flex-1 basis-60">
                                     <h2 class="text-base font-semibold">
                                         SES inbound webhook
                                     </h2>
@@ -4404,7 +4613,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                     </p>
                                 </div>
                                 <button
-                                    class="ml-auto inline-flex items-center gap-2 rounded-lg border border-zinc-200 px-3 py-2 text-sm font-semibold text-zinc-600 hover:text-zinc-950 dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
+                                    class="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-zinc-200 px-3 py-2 text-sm font-semibold text-zinc-600 hover:text-zinc-950 sm:ml-auto sm:w-auto dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
                                     @click="copyText(sesWebhookUrl)"
                                 >
                                     <Copy class="size-4" /> Copy URL
@@ -4419,7 +4628,7 @@ function recipientTitle(email: EmailRow): string | undefined {
 
                         <section
                             v-if="showWebhookDeliveries"
-                            class="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-[#090a0a]"
+                            class="overflow-x-auto rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-[#090a0a]"
                         >
                             <div
                                 class="border-b border-zinc-200 px-3 py-2.5 dark:border-zinc-800"
@@ -4499,7 +4708,7 @@ function recipientTitle(email: EmailRow): string | undefined {
 
                     <div v-else-if="section === 'api-keys'" class="grid gap-4">
                         <section
-                            class="grid grid-cols-3 overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-[#1d2125] dark:bg-[#111315]"
+                            class="grid grid-cols-1 overflow-hidden rounded-lg border border-zinc-200 sm:grid-cols-3 dark:border-[#1d2125] dark:bg-[#111315]"
                         >
                             <div
                                 v-for="stat in apiKeyStats"
@@ -4527,9 +4736,11 @@ function recipientTitle(email: EmailRow): string | undefined {
                             class="grid gap-3 rounded-lg border border-zinc-200 bg-white p-3 dark:border-[#1d2125] dark:bg-[#111315]"
                             @submit.prevent="issueApiKey"
                         >
-                            <div class="flex items-center gap-3">
-                                <KeyRound class="size-4 text-teal-400" />
-                                <div class="min-w-0">
+                            <div class="flex flex-wrap items-center gap-3">
+                                <KeyRound
+                                    class="size-4 shrink-0 text-teal-400"
+                                />
+                                <div class="min-w-0 flex-1 basis-60">
                                     <div class="font-semibold">
                                         Keys are only shown once at creation.
                                     </div>
@@ -4542,7 +4753,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                     </div>
                                 </div>
                                 <button
-                                    class="ml-auto rounded-lg bg-teal-400 px-3 py-2 text-[12px] font-bold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60"
+                                    class="ml-auto w-full rounded-lg bg-teal-400 px-3 py-2 text-[12px] font-bold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
                                     :disabled="apiKeyForm.scopes.length === 0"
                                 >
                                     + Create key
@@ -4603,10 +4814,139 @@ function recipientTitle(email: EmailRow): string | undefined {
                             </div>
                         </form>
                         <div
-                            class="overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-[#1d2125] dark:bg-[#0b0c0d]"
+                            class="overflow-x-auto rounded-lg border border-zinc-200 bg-white dark:border-[#1d2125] dark:bg-[#0b0c0d]"
                         >
                             <div
-                                class="grid grid-cols-[240px_170px_minmax(190px,1fr)_150px_160px_120px_92px] border-b border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-[11px] tracking-widest text-zinc-500 uppercase dark:border-[#1d2125] dark:bg-[#111315]"
+                                class="divide-y divide-zinc-200 xl:hidden dark:divide-[#16191c]"
+                            >
+                                <article
+                                    v-for="(apiKey, index) in apiKeys"
+                                    :key="'mobile-' + apiKey.id"
+                                    class="grid gap-3 p-3 text-[13px]"
+                                >
+                                    <div class="flex min-w-0 items-start gap-3">
+                                        <div class="min-w-0 flex-1">
+                                            <div
+                                                class="font-semibold break-words"
+                                            >
+                                                {{ apiKey.name }}
+                                            </div>
+                                            <div
+                                                class="font-mono text-[10px] text-zinc-500"
+                                            >
+                                                k_{{
+                                                    index
+                                                        .toString()
+                                                        .padStart(5, '0')
+                                                }}
+                                            </div>
+                                        </div>
+                                        <div
+                                            v-if="workspace.can_manage_api_keys"
+                                            class="flex shrink-0 justify-end gap-1"
+                                        >
+                                            <button
+                                                type="button"
+                                                class="inline-flex size-8 items-center justify-center rounded-md text-zinc-400 hover:bg-amber-50 hover:text-amber-600 dark:hover:bg-amber-500/10 dark:hover:text-amber-300"
+                                                title="Rotate API key"
+                                                @click="rotateApiKey(apiKey)"
+                                            >
+                                                <RefreshCw class="size-3.5" />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                class="inline-flex size-8 items-center justify-center rounded-md text-zinc-400 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10 dark:hover:text-red-300"
+                                                title="Delete API key"
+                                                @click="deleteApiKey(apiKey)"
+                                            >
+                                                <Trash2 class="size-3.5" />
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div
+                                        class="flex min-w-0 items-center gap-2"
+                                    >
+                                        <span
+                                            class="min-w-0 font-mono text-[12px] break-all text-zinc-500"
+                                            >{{ apiKey.prefix }}••••</span
+                                        >
+                                        <button
+                                            class="shrink-0 rounded p-1 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-950 dark:hover:bg-[#111315] dark:hover:text-zinc-100"
+                                            title="Copy key prefix"
+                                            @click="copyText(apiKey.prefix)"
+                                        >
+                                            <Copy class="size-3.5" />
+                                        </button>
+                                    </div>
+                                    <div class="flex flex-wrap gap-1">
+                                        <span
+                                            v-for="scope in apiKeyScopes(
+                                                apiKey,
+                                            )"
+                                            :key="
+                                                'mobile-' +
+                                                apiKey.id +
+                                                '-' +
+                                                scope
+                                            "
+                                            class="rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500 dark:bg-[#1a1e22]"
+                                            >{{ apiKeyScopeLabel(scope) }}</span
+                                        >
+                                    </div>
+                                    <dl
+                                        class="grid grid-cols-2 gap-3 rounded-lg bg-zinc-50 p-2 text-xs dark:bg-[#111315]"
+                                    >
+                                        <div>
+                                            <dt class="text-zinc-500">
+                                                Last used
+                                            </dt>
+                                            <dd class="mt-0.5 font-mono">
+                                                {{
+                                                    apiKey.last_used_at
+                                                        ? relativeTime(
+                                                              apiKey.last_used_at,
+                                                          )
+                                                        : 'never'
+                                                }}
+                                            </dd>
+                                        </div>
+                                        <div>
+                                            <dt class="text-zinc-500">
+                                                Expires
+                                            </dt>
+                                            <dd class="mt-0.5 font-mono">
+                                                {{
+                                                    apiKey.expires_at
+                                                        ? relativeTime(
+                                                              apiKey.expires_at,
+                                                          )
+                                                        : 'never'
+                                                }}
+                                            </dd>
+                                        </div>
+                                        <div class="min-w-0">
+                                            <dt class="text-zinc-500">
+                                                Last app / IP
+                                            </dt>
+                                            <dd
+                                                class="mt-0.5 font-mono break-all"
+                                            >
+                                                {{ apiKey.last_used_ip || '—' }}
+                                            </dd>
+                                        </div>
+                                        <div>
+                                            <dt class="text-zinc-500">
+                                                Created
+                                            </dt>
+                                            <dd class="mt-0.5 font-mono">
+                                                {{ apiKey.created_at }}
+                                            </dd>
+                                        </div>
+                                    </dl>
+                                </article>
+                            </div>
+                            <div
+                                class="hidden grid-cols-[240px_170px_minmax(190px,1fr)_150px_160px_120px_92px] border-b border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-[11px] tracking-widest text-zinc-500 uppercase xl:grid dark:border-[#1d2125] dark:bg-[#111315]"
                             >
                                 <div>Name</div>
                                 <div>Key prefix</div>
@@ -4620,7 +4960,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                             <div
                                 v-for="(apiKey, index) in apiKeys"
                                 :key="apiKey.id"
-                                class="grid min-h-12 grid-cols-[240px_170px_minmax(190px,1fr)_150px_160px_120px_92px] items-center gap-2 border-b border-zinc-200 px-3 py-2 text-[13px] last:border-b-0 dark:border-[#16191c]"
+                                class="hidden min-h-12 grid-cols-[240px_170px_minmax(190px,1fr)_150px_160px_120px_92px] items-center gap-2 border-b border-zinc-200 px-3 py-2 text-[13px] last:border-b-0 xl:grid dark:border-[#16191c]"
                             >
                                 <div class="min-w-0">
                                     <div class="truncate font-semibold">
