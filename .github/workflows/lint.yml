@@ -39,6 +39,11 @@ jobs:
           composer install -q --no-ansi --no-interaction --no-scripts --no-progress --prefer-dist
           npm ci
 
+      - name: Generate Wayfinder Types
+        run: |
+          php artisan package:discover --ansi
+          php artisan wayfinder:generate --with-form --no-interaction
+
       - name: Check Pint
         run: composer lint:check
 
