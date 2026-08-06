@@ -10,6 +10,8 @@ use App\Models\Source;
 use App\Models\Suppression;
 use App\Models\Template;
 use App\Services\Providers\EmailProviderFactory;
+use Illuminate\Bus\UniqueLock;
+use Illuminate\Contracts\Cache\Repository as Cache;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -23,6 +25,7 @@ class EmailSendService
         private MimeMessageBuilder $mimeBuilder,
         private EmailProviderFactory $providers,
         private ThreadResolver $threads,
+        private Cache $cache,
     ) {}
 
     /**
@@ -118,7 +121,15 @@ class EmailSendService
         }
 
         EmailActivityUpdated::dispatch($email);
-        SendQueuedEmail::dispatch($email->id);
+        $sendJob = new SendQueuedEmail($email->id);
+
+        try {
+            dispatch($sendJob);
+        } catch (Throwable $exception) {
+            (new UniqueLock($this->cache))->release($sendJob);
+
+            throw $exception;
+        }
 
         return $email;
     }

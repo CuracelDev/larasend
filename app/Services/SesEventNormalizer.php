@@ -44,12 +44,16 @@ class SesEventNormalizer
         $nextStatus = $this->statusFor($eventType);
 
         $event = DB::transaction(function () use ($email, $source, $eventType, $sesMessageId, $providerEventId, $recipient, $detail, $payload, $message, $nextStatus): EmailEvent {
-            if ($email && $this->statusPriority($nextStatus) >= $this->statusPriority($email->status)) {
-                $email->forceFill(['status' => $nextStatus])->save();
+            $lockedEmail = $email
+                ? Email::query()->whereKey($email->id)->lockForUpdate()->first()
+                : null;
+
+            if ($lockedEmail && $this->statusPriority($nextStatus) >= $this->statusPriority($lockedEmail->status)) {
+                $lockedEmail->forceFill(['status' => $nextStatus])->save();
             }
 
             $event = EmailEvent::create([
-                'email_id' => $email?->id,
+                'email_id' => $lockedEmail?->id,
                 'source_id' => $source->id,
                 'event_type' => $eventType,
                 'ses_message_id' => $sesMessageId,
@@ -62,15 +66,15 @@ class SesEventNormalizer
                 'occurred_at' => $this->occurredAt($message, $detail),
             ]);
 
-            if ($email) {
-                $this->recordSuppression($email, $eventType, $payload, $recipient);
+            if ($lockedEmail) {
+                $this->recordSuppression($lockedEmail, $eventType, $payload, $recipient);
             }
 
             return $event;
         });
 
-        if ($email) {
-            EmailActivityUpdated::dispatch($email->fresh());
+        if ($event->email) {
+            EmailActivityUpdated::dispatch($event->email->fresh());
         }
 
         $this->webhookDeliveryService->dispatchFor($event);

@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\CloudflareInboundDomain;
 use App\Models\Project;
 use App\Models\Source;
 use App\Models\User;
@@ -54,12 +55,12 @@ it('prevents two projects from taking over the same cloudflare zone catch all', 
         'slug' => 'other-inbox',
     ]);
     $otherProject->domains()->create([
-        'domain' => 'support.example.com',
+        'domain' => 'legacy-mail.example.com',
         'status' => 'verified',
         'dns_records' => [],
         'verified_at' => now(),
         'inbound_enabled_at' => now(),
-        'inbound_domain' => 'example.com',
+        'inbound_domain' => null,
     ]);
     Http::fake([
         'https://api.cloudflare.com/client/v4/zones?*' => Http::response([
@@ -73,7 +74,8 @@ it('prevents two projects from taking over the same cloudflare zone catch all', 
         ->assertRedirect("/projects/{$project->slug}/identities");
 
     expect($domain->fresh()->inbound_enabled_at)->toBeNull()
-        ->and(session('inboundError'))->toContain('already connected to another Larasend project');
+        ->and(session('inboundError'))->toContain('already connected to another Larasend project')
+        ->and(CloudflareInboundDomain::query()->count())->toBe(0);
     Http::assertNotSent(fn ($request) => str_contains($request->url(), '/workers/scripts/'));
 });
 
@@ -100,7 +102,9 @@ it('provisions cloudflare inbound end to end: worker, routing, catch-all', funct
         ->assertRedirect("/projects/{$project->slug}/identities");
 
     expect($domain->fresh()->inbound_enabled_at)->not->toBeNull()
-        ->and($domain->fresh()->inbound_domain)->toBe('example.com');
+        ->and($domain->fresh()->inbound_domain)->toBe('example.com')
+        ->and(CloudflareInboundDomain::query()->where('zone', 'example.com')->value('project_id'))
+        ->toBe($project->id);
 
     Http::assertSent(function ($request) use ($source, $workerName) {
         if (! str_contains($request->url(), '/workers/scripts/'.$workerName)) {
@@ -140,9 +144,35 @@ it('surfaces the missing worker permission with manual instructions', function (
     $toast = session('inertia.flash_data')['toast'] ?? null;
 
     expect($domain->fresh()->inbound_enabled_at)->toBeNull()
+        ->and(CloudflareInboundDomain::query()->count())->toBe(0)
         ->and($toast['type'])->toBe('error')
         ->and($toast['message'])->toContain('Workers Scripts: Edit')
         ->and(session('inboundError'))->toContain('Workers Scripts: Edit');
+});
+
+it('keeps a zone reserved when cloudflare may already have changed the catch all', function () {
+    [$user, $project, $source, $domain] = provisioningFixture();
+
+    Http::fake([
+        'https://api.cloudflare.com/client/v4/zones?*' => Http::response([
+            'success' => true,
+            'result' => [['id' => 'zone-9', 'name' => 'example.com', 'account' => ['id' => 'acc-prov']]],
+        ]),
+        'https://api.cloudflare.com/client/v4/accounts/acc-prov/workers/scripts/*' => Http::response(['success' => true]),
+        'https://api.cloudflare.com/client/v4/zones/zone-9/email/routing/rules/catch_all' => Http::response(['success' => true]),
+        'https://api.cloudflare.com/client/v4/zones/zone-9/email/routing/enable' => Http::response(['success' => false], 403),
+        'https://cloudflare-dns.com/*' => Http::response(['Status' => 3, 'Answer' => []]),
+        'https://dns.google/*' => Http::response(['Status' => 3, 'Answer' => []]),
+        'https://api.cloudflare.com/client/v4/zones/zone-9/dns_records' => Http::response(['success' => false], 500),
+    ]);
+
+    $this->actingAs($user)
+        ->post("/projects/{$project->slug}/domains/{$domain->id}/inbound")
+        ->assertRedirect("/projects/{$project->slug}/identities");
+
+    expect($domain->fresh()->inbound_enabled_at)->toBeNull()
+        ->and(CloudflareInboundDomain::query()->where('zone', 'example.com')->value('project_id'))
+        ->toBe($project->id);
 });
 
 it('refuses to enable inbound for non-cloudflare sources', function () {

@@ -154,3 +154,22 @@ test('workspace owners must transfer or delete their workspace before deleting t
         ->and($workspace->fresh())->not->toBeNull();
     $this->assertAuthenticatedAs($user);
 });
+
+test('a workspace owner can transfer ownership and then delete their account', function () {
+    $owner = User::factory()->create();
+    $workspace = app(ProjectContext::class)->workspaceFor($owner);
+    $newOwner = User::factory()->create();
+    $workspace->users()->attach($newOwner, ['role' => 'member']);
+
+    $this->actingAs($owner)
+        ->patch(route('workspace-members.ownership.transfer', $newOwner))
+        ->assertRedirect();
+
+    $this->delete(route('profile.destroy'), ['password' => 'password'])
+        ->assertSessionHasNoErrors()
+        ->assertRedirect(route('home'));
+
+    expect($owner->fresh())->toBeNull()
+        ->and($workspace->fresh()->owner_id)->toBe($newOwner->id);
+    $this->assertGuest();
+});

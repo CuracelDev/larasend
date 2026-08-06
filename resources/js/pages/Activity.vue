@@ -7,6 +7,7 @@ import {
     Check,
     Cloud,
     Copy,
+    Crown,
     Inbox,
     KeyRound,
     Pencil,
@@ -29,6 +30,7 @@ import DashboardPanel from '@/components/DashboardPanel.vue';
 import EmailProviderPanel from '@/components/EmailProviderPanel.vue';
 import GlobalRail from '@/components/GlobalRail.vue';
 import { Toaster } from '@/components/ui/sonner';
+import { transfer as transferWorkspaceOwnershipRoute } from '@/routes/workspace-members/ownership';
 
 type Metric = {
     label: string;
@@ -561,6 +563,9 @@ const workspaceRoleOptions: {
         description: 'Full workspace administration.',
     },
 ];
+const assignableWorkspaceRoleOptions = workspaceRoleOptions.filter(
+    (role) => role.value !== 'owner',
+);
 
 const apiKeyScopeOptions: { value: ApiKeyScope; label: string }[] = [
     { value: 'send', label: 'Send email' },
@@ -1471,6 +1476,24 @@ function removeWorkspaceMember(memberId: number): void {
             router.delete(`/workspace/members/${memberId}`, {
                 preserveScroll: true,
             });
+        },
+    });
+}
+
+function transferWorkspaceOwnership(
+    member: (typeof props.workspaceMembers)[number],
+): void {
+    openConfirmation({
+        title: `Transfer ownership to ${member.name}?`,
+        body: `This gives ${member.email} full ownership of ${props.workspace.name}. Your role will change to Member, and only the new owner can transfer ownership again.`,
+        actionLabel: 'Transfer ownership',
+        tone: 'warning',
+        onConfirm: () => {
+            router.patch(
+                transferWorkspaceOwnershipRoute.url(member.id),
+                {},
+                { preserveScroll: true },
+            );
         },
     });
 }
@@ -3010,7 +3033,14 @@ function recipientTitle(email: EmailRow): string | undefined {
                                 @submit.prevent="addWorkspaceMember"
                             >
                                 <div class="min-w-0">
+                                    <label
+                                        for="workspace-member-email"
+                                        class="mb-1.5 block text-xs font-medium text-zinc-500 dark:text-zinc-400"
+                                    >
+                                        Email address
+                                    </label>
                                     <input
+                                        id="workspace-member-email"
                                         v-model="workspaceMemberForm.email"
                                         type="email"
                                         required
@@ -3030,7 +3060,14 @@ function recipientTitle(email: EmailRow): string | undefined {
                                     </p>
                                 </div>
                                 <div>
+                                    <label
+                                        for="workspace-member-role"
+                                        class="mb-1.5 block text-xs font-medium text-zinc-500 dark:text-zinc-400"
+                                    >
+                                        Role
+                                    </label>
                                     <select
+                                        id="workspace-member-role"
                                         v-model="workspaceMemberForm.role"
                                         class="w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-800 dark:bg-[#101111]"
                                         :class="{
@@ -3039,7 +3076,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                         }"
                                     >
                                         <option
-                                            v-for="role in workspaceRoleOptions"
+                                            v-for="role in assignableWorkspaceRoleOptions"
                                             :key="role.value"
                                             :value="role.value"
                                         >
@@ -3055,7 +3092,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                 </div>
                                 <button
                                     type="submit"
-                                    class="h-9 rounded-lg bg-teal-300 px-4 text-sm font-bold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60"
+                                    class="h-9 self-end rounded-lg bg-teal-300 px-4 text-sm font-bold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60"
                                     :disabled="workspaceMemberForm.processing"
                                 >
                                     {{
@@ -3070,7 +3107,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                 class="grid overflow-x-auto rounded-lg border border-zinc-200 bg-white dark:border-[#1d2125] dark:bg-[#101111]"
                             >
                                 <div
-                                    class="grid min-w-[760px] grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_220px_52px] border-b border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-[11px] tracking-widest text-zinc-500 uppercase dark:border-[#1d2125] dark:bg-[#111315]"
+                                    class="grid min-w-[800px] grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_220px_92px] border-b border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-[11px] tracking-widest text-zinc-500 uppercase dark:border-[#1d2125] dark:bg-[#111315]"
                                 >
                                     <div>Name</div>
                                     <div>Email</div>
@@ -3080,7 +3117,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                 <div
                                     v-for="member in workspaceMembers"
                                     :key="member.id"
-                                    class="grid min-h-12 min-w-[760px] grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_220px_52px] items-center border-b border-zinc-200 px-3 text-sm last:border-b-0 dark:border-[#16191c]"
+                                    class="grid min-h-12 min-w-[800px] grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_220px_92px] items-center border-b border-zinc-200 px-3 text-sm last:border-b-0 dark:border-[#16191c]"
                                 >
                                     <div class="min-w-0">
                                         <div
@@ -3116,7 +3153,7 @@ function recipientTitle(email: EmailRow): string | undefined {
                                             "
                                         >
                                             <option
-                                                v-for="role in workspaceRoleOptions"
+                                                v-for="role in assignableWorkspaceRoleOptions"
                                                 :key="`${member.id}-${role.value}`"
                                                 :value="role.value"
                                             >
@@ -3130,7 +3167,26 @@ function recipientTitle(email: EmailRow): string | undefined {
                                             {{ roleLabel(member.role) }}
                                         </span>
                                     </div>
-                                    <div class="text-right">
+                                    <div
+                                        class="flex items-center justify-end gap-1"
+                                    >
+                                        <button
+                                            v-if="
+                                                workspace.can_manage_members &&
+                                                !member.is_owner
+                                            "
+                                            type="button"
+                                            class="inline-flex size-8 items-center justify-center rounded-md text-zinc-500 hover:bg-amber-50 hover:text-amber-700 dark:hover:bg-amber-500/10 dark:hover:text-amber-300"
+                                            :aria-label="`Transfer workspace ownership to ${member.name}`"
+                                            :title="`Transfer workspace ownership to ${member.name}`"
+                                            @click="
+                                                transferWorkspaceOwnership(
+                                                    member,
+                                                )
+                                            "
+                                        >
+                                            <Crown class="size-4" />
+                                        </button>
                                         <button
                                             v-if="
                                                 workspace.can_manage_members &&

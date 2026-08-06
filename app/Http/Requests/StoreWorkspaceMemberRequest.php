@@ -28,7 +28,7 @@ class StoreWorkspaceMemberRequest extends FormRequest
     {
         return [
             'email' => ['required', 'email', 'max:255'],
-            'role' => ['required', Rule::in(['owner', 'member', 'sender', 'api_keys', 'domains', 'read_only'])],
+            'role' => ['required', Rule::in(['member', 'sender', 'api_keys', 'domains', 'read_only'])],
         ];
     }
 }

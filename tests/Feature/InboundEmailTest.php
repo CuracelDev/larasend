@@ -1,6 +1,7 @@
 <?php
 
 use App\Jobs\DeliverInboundWebhook;
+use App\Models\CloudflareInboundDomain;
 use App\Models\InboundEmail;
 use App\Models\Project;
 use App\Models\Source;
@@ -90,6 +91,54 @@ it('ingests inbound email posted by the cloudflare worker', function () {
         ->and($inbound->mime_size)->toBeGreaterThan(0);
 
     Queue::assertPushed(DeliverInboundWebhook::class);
+});
+
+it('streams raw inbound mime from the cloudflare worker without base64 buffering', function () {
+    [, , $project, $source] = inboundProjectFixture();
+    Queue::fake();
+
+    $this->call(
+        'POST',
+        "/api/webhooks/inbound/cloudflare/{$source->webhook_token}",
+        server: [
+            'CONTENT_TYPE' => 'message/rfc822',
+            'HTTP_LARASEND_ENVELOPE_FROM' => 'maya@customer.test',
+            'HTTP_LARASEND_ENVELOPE_TO' => 'support@example.com',
+        ],
+        content: sampleInboundMime(),
+    )->assertAccepted();
+
+    $inbound = InboundEmail::query()->firstOrFail();
+
+    expect($inbound->project_id)->toBe($project->id)
+        ->and($inbound->subject)->toBe('Need help with my invoice')
+        ->and($inbound->mime_size)->toBe(strlen(sampleInboundMime()));
+});
+
+it('adopts an existing cloudflare zone when upgrading a legacy inbound domain', function () {
+    [, , , $source] = inboundProjectFixture();
+    $domain = $source->project->domains()->firstOrFail();
+    $domain->forceFill([
+        'domain' => 'mail.example.com',
+        'inbound_domain' => null,
+    ])->save();
+    Queue::fake();
+    Http::fake([
+        'https://api.cloudflare.com/client/v4/zones?*' => Http::response([
+            'success' => true,
+            'result' => [['id' => 'zone-legacy', 'name' => 'example.com', 'account' => ['id' => 'acc-inbound']]],
+        ]),
+    ]);
+
+    $this->postJson("/api/webhooks/inbound/cloudflare/{$source->webhook_token}", [
+        'from' => 'maya@customer.test',
+        'to' => 'support@example.com',
+        'raw' => base64_encode(sampleInboundMime()),
+    ])->assertAccepted();
+
+    expect($domain->fresh()->inbound_domain)->toBe('example.com')
+        ->and(CloudflareInboundDomain::query()->where('zone', 'example.com')->value('project_id'))
+        ->toBe($source->project_id);
 });
 
 it('stores inbound mime on the configured shared disk', function () {

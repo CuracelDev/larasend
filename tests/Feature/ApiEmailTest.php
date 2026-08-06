@@ -1,5 +1,6 @@
 <?php
 
+use App\Jobs\RecoverStuckQueuedEmails;
 use App\Jobs\SendQueuedEmail;
 use App\Models\ApiKey;
 use App\Models\Email;
@@ -11,9 +12,13 @@ use App\Models\Workspace;
 use App\Services\EmailSendService;
 use App\Services\Providers\EmailProviderFactory;
 use App\Services\SesV2Client;
+use Illuminate\Cache\RateLimiter as CacheRateLimiter;
+use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Contracts\Bus\Dispatcher;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Client\Request;
+use Illuminate\Http\Request as HttpRequest;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
@@ -106,23 +111,64 @@ it('keeps committed outbound mime when queue dispatch is temporarily unavailable
     [, $project, $source] = larasendProjectFixture();
     config(['larasend.mime_disk' => 'shared-mail']);
     Storage::fake('shared-mail');
+    $originalDispatcher = app(Dispatcher::class);
     $dispatcher = Mockery::mock(Dispatcher::class);
     $dispatcher->shouldReceive('getCommandHandler')->andReturnNull();
     $dispatcher->shouldReceive('dispatchNow')->andReturnUsing(fn (object $command): object => $command);
     $dispatcher->shouldReceive('dispatch')->andThrow(new RuntimeException('Queue unavailable.'));
     $this->app->instance(Dispatcher::class, $dispatcher);
 
-    expect(fn () => app(EmailSendService::class)->send($project, $source, [
-        'from' => 'Larasend <receipts@example.com>',
-        'to' => ['maya@example.com'],
-        'subject' => 'Durable queue handoff',
-        'text' => 'Keep this MIME for retry.',
-    ]))->toThrow(RuntimeException::class, 'Queue unavailable.');
+    try {
+        expect(fn () => app(EmailSendService::class)->send($project, $source, [
+            'from' => 'Larasend <receipts@example.com>',
+            'to' => ['maya@example.com'],
+            'subject' => 'Durable queue handoff',
+            'text' => 'Keep this MIME for retry.',
+        ]))->toThrow(RuntimeException::class, 'Queue unavailable.');
+    } finally {
+        $this->app->instance(Dispatcher::class, $originalDispatcher);
+    }
 
     $email = Email::query()->where('subject', 'Durable queue handoff')->firstOrFail();
 
     expect($email->status)->toBe('queued');
     Storage::disk('shared-mail')->assertExists($email->mime_path);
+
+    $email->forceFill(['created_at' => now()->subMinutes(3)])->saveQuietly();
+    $recentEmail = $email->replicate();
+    $recentEmail->forceFill([
+        'public_id' => 'email_'.str()->random(24),
+        'subject' => 'Recent queue handoff',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ])->saveQuietly();
+    Queue::fake();
+
+    (new RecoverStuckQueuedEmails)->handle();
+
+    Queue::assertPushed(
+        SendQueuedEmail::class,
+        fn (SendQueuedEmail $job): bool => $job->emailId === $email->id,
+    );
+    Queue::assertNotPushed(
+        SendQueuedEmail::class,
+        fn (SendQueuedEmail $job): bool => $job->emailId === $recentEmail->id,
+    );
+});
+
+it('schedules unique queued email recovery without overlapping', function () {
+    $job = new RecoverStuckQueuedEmails;
+    $event = collect(app(Schedule::class)->events())
+        ->first(fn ($event): bool => $event->description === RecoverStuckQueuedEmails::class);
+    $retryAfterValues = collect(config('queue.connections'))
+        ->pluck('retry_after')
+        ->filter(fn ($retryAfter): bool => is_int($retryAfter));
+
+    expect($job)->toBeInstanceOf(ShouldBeUnique::class)
+        ->and($retryAfterValues->every(fn (int $retryAfter): bool => $job->timeout < $retryAfter))->toBeTrue()
+        ->and($event)->not->toBeNull()
+        ->and($event->expression)->toBe('* * * * *')
+        ->and($event->withoutOverlapping)->toBeTrue();
 });
 
 it('replays idempotent sends without queueing a duplicate email', function () {
@@ -524,6 +570,18 @@ it('applies the ip limiter before api key authentication', function () {
         ->getJson('/api/emails')
         ->assertUnauthorized()
         ->assertHeader('X-RateLimit-Limit', '180');
+});
+
+it('keys the pre-auth api limiter by the socket address', function () {
+    $limiter = app(CacheRateLimiter::class)->limiter('larasend-api-ip');
+    $request = HttpRequest::create('/api/emails', server: [
+        'REMOTE_ADDR' => '198.51.100.77',
+        'HTTP_X_FORWARDED_FOR' => '203.0.113.24',
+    ]);
+
+    expect($limiter)->not->toBeNull()
+        ->and($limiter($request)->key)->toBe('198.51.100.77')
+        ->not->toBe('203.0.113.24');
 });
 
 it('rejects expired api keys', function () {

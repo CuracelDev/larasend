@@ -5,6 +5,7 @@ namespace Database\Seeders;
 use App\Models\ApiKey;
 use App\Models\Domain;
 use App\Models\Email;
+use App\Models\InboundEmail;
 use App\Models\Project;
 use App\Models\Source;
 use App\Models\Template;
@@ -14,21 +15,24 @@ use App\Models\Workspace;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use RuntimeException;
 
 class DatabaseSeeder extends Seeder
 {
+    public function __construct(private InboxDemoSeeder $inboxDemoSeeder) {}
+
     public function run(): void
     {
-        if (app()->isProduction()) {
-            throw new RuntimeException('The demo database seeder is disabled in production.');
+        if (! app()->environment(['local', 'testing'])) {
+            throw new RuntimeException('The demo database seeder is only available in local and testing environments.');
         }
 
-        $user = User::query()->updateOrCreate(
-            ['email' => 'hello@vijaykumar.me'],
+        $user = User::query()->firstOrCreate(
+            ['email' => 'demo@larasend.test'],
             [
-                'name' => 'Vijay Tupakula',
+                'name' => 'Larasend Demo',
                 'email_verified_at' => now(),
                 'password' => Hash::make('password'),
             ],
@@ -71,15 +75,25 @@ class DatabaseSeeder extends Seeder
             $this->seedApiKeys($demoProject, $source);
             $this->seedWebhooks($demoProject);
             $this->seedEmails($workspace, $demoProject, $source, $templates);
+            $this->inboxDemoSeeder->seed($demoProject);
         }
     }
 
     private function resetDemoData(Project $project): void
     {
         $project->emails()->with('events')->each(function (Email $email): void {
+            if ($email->mime_path) {
+                Storage::disk($email->mime_disk)->delete($email->mime_path);
+            }
+
             $email->events()->delete();
             $email->delete();
         });
+        $project->inboundEmails()->each(function (InboundEmail $email): void {
+            Storage::disk($email->mime_disk)->delete($email->mime_path);
+            $email->delete();
+        });
+        $project->threads()->delete();
         $project->webhookEndpoints()->get()->each->delete();
         $project->apiKeys()->delete();
     }

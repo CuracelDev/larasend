@@ -4,9 +4,8 @@ namespace App\Http\Requests;
 
 use App\Support\ProjectContext;
 use Illuminate\Foundation\Http\FormRequest;
-use Illuminate\Validation\Rule;
 
-class UpdateWorkspaceMemberRequest extends FormRequest
+class TransferWorkspaceOwnershipRequest extends FormRequest
 {
     public function authorize(): bool
     {
@@ -18,16 +17,16 @@ class UpdateWorkspaceMemberRequest extends FormRequest
 
         return app(ProjectContext::class)
             ->workspaceFor($user)
-            ->canManageMembers($user);
+            ->owner_id === $user->id;
     }
 
     /**
+     * Get the validation rules that apply to the request.
+     *
      * @return array<string, array<int, mixed>>
      */
     public function rules(): array
     {
-        return [
-            'role' => ['required', Rule::in(['member', 'sender', 'api_keys', 'domains', 'read_only'])],
-        ];
+        return [];
     }
 }

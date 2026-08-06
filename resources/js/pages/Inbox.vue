@@ -969,6 +969,7 @@ function participantSummary(thread: ThreadRow): string {
             :projects="projects"
             :inbox-unread="counts.unread"
         />
+        <h1 class="sr-only">Inbox</h1>
         <header
             class="col-start-1 row-start-1 flex items-center gap-3 border-b border-zinc-200 px-4 lg:col-start-2 dark:border-[#1d2125]"
         >
@@ -1448,9 +1449,9 @@ function participantSummary(thread: ThreadRow): string {
                         <ArrowLeft class="size-4" />
                     </button>
                     <div class="min-w-0 flex-1 md:basis-full 2xl:basis-auto">
-                        <h1 class="truncate text-[15px] font-semibold">
+                        <h2 class="truncate text-[15px] font-semibold">
                             {{ selectedThread.subject || '(no subject)' }}
-                        </h1>
+                        </h2>
                         <p class="truncate font-mono text-[11px] text-zinc-500">
                             {{ selectedThread.participants.join(' · ') }}
                         </p>

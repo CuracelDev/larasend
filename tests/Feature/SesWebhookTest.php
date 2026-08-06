@@ -9,6 +9,7 @@ use App\Models\WebhookLog;
 use App\Models\Workspace;
 use App\Services\SesEventNormalizer;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 
 function sesWebhookFixture(): array
@@ -171,6 +172,46 @@ it('does not regress an advanced email status when an older event arrives late',
 
     expect($email->fresh()->status)->toBe('clicked')
         ->and($email->events()->pluck('event_type')->all())->toContain('click', 'delivery');
+});
+
+it('reloads and locks the email before advancing its ses status', function () {
+    [$source, $email] = sesWebhookFixture();
+    $retrievedEvent = 'eloquent.retrieved: '.Email::class;
+    $advancedAfterLookup = false;
+
+    Event::listen($retrievedEvent, function (Email $retrievedEmail) use ($email, &$advancedAfterLookup): void {
+        if ($advancedAfterLookup || $retrievedEmail->id !== $email->id) {
+            return;
+        }
+
+        $advancedAfterLookup = true;
+        DB::table('emails')->where('id', $email->id)->update([
+            'status' => 'clicked',
+            'updated_at' => now(),
+        ]);
+    });
+
+    try {
+        app(SesEventNormalizer::class)->record($source, [
+            'eventType' => 'Delivery',
+            'mail' => [
+                'messageId' => 'ses-1',
+                'timestamp' => now()->toIso8601String(),
+                'destination' => ['maya@example.com'],
+            ],
+            'delivery' => [
+                'recipients' => ['maya@example.com'],
+                'timestamp' => now()->toIso8601String(),
+            ],
+        ], 'sns-stale-email-model');
+    } finally {
+        Event::forget($retrievedEvent);
+    }
+
+    expect($advancedAfterLookup)->toBeTrue()
+        ->and($email->fresh()->status)->toBe('clicked')
+        ->and($email->events()->where('event_type', 'delivery')->exists())->toBeTrue()
+        ->and(file_get_contents(app_path('Services/SesEventNormalizer.php')))->toContain('->lockForUpdate()');
 });
 
 it('records suppressions for permanent ses bounces and complaints', function () {

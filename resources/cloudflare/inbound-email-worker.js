@@ -11,24 +11,14 @@
  */
 export default {
     async email(message, env) {
-        const buffer = await new Response(message.raw).arrayBuffer();
-        const bytes = new Uint8Array(buffer);
-
-        let binary = '';
-        const chunkSize = 0x8000;
-
-        for (let i = 0; i < bytes.length; i += chunkSize) {
-            binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-        }
-
         const response = await fetch(env.LARASEND_INBOUND_URL, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                from: message.from,
-                to: message.to,
-                raw: btoa(binary),
-            }),
+            headers: {
+                'Content-Type': 'message/rfc822',
+                'Larasend-Envelope-From': message.from,
+                'Larasend-Envelope-To': message.to,
+            },
+            body: message.raw,
         });
 
         if (!response.ok) {

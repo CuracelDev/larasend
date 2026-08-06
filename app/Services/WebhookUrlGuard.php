@@ -42,7 +42,11 @@ class WebhookUrlGuard
             throw new UnsafeWebhookUrlException('Webhook URLs cannot contain credentials.');
         }
 
-        $host = strtolower(rtrim($parts['host'], '.'));
+        if (str_ends_with($parts['host'], '.')) {
+            throw new UnsafeWebhookUrlException('Webhook hostnames cannot end with a dot.');
+        }
+
+        $host = strtolower($parts['host']);
 
         if ($host === '' || $host === 'localhost' || str_ends_with($host, '.localhost')) {
             throw new UnsafeWebhookUrlException('The webhook URL must use a public hostname.');

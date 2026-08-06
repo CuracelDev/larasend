@@ -18,6 +18,32 @@ it('requires an explicitly configured independent control mailer', function () {
     expect(app(ControlMail::class)->isConfigured())->toBeTrue();
 });
 
+it('rejects unsafe mailers anywhere in a configured failover graph', function () {
+    config([
+        'larasend.control_mailer' => 'control',
+        'mail.mailers.control' => ['transport' => 'failover', 'mailers' => ['smtp', 'unsafe-fallback']],
+        'mail.mailers.unsafe-fallback' => ['transport' => 'roundrobin', 'mailers' => ['log']],
+    ]);
+
+    expect(app(ControlMail::class)->isConfigured())->toBeFalse();
+});
+
+it('rejects missing mailers and cycles in a configured mailer graph', function () {
+    config([
+        'larasend.control_mailer' => 'control',
+        'mail.mailers.control' => ['transport' => 'failover', 'mailers' => ['missing']],
+    ]);
+
+    expect(app(ControlMail::class)->isConfigured())->toBeFalse();
+
+    config([
+        'mail.mailers.control' => ['transport' => 'roundrobin', 'mailers' => ['secondary']],
+        'mail.mailers.secondary' => ['transport' => 'failover', 'mailers' => ['control']],
+    ]);
+
+    expect(app(ControlMail::class)->isConfigured())->toBeFalse();
+});
+
 it('grandfathers existing users without changing historical verification timestamps', function () {
     config(['larasend.control_mailer' => 'smtp']);
     $user = User::factory()->create([
@@ -74,4 +100,15 @@ it('administratively verifies an exact user only with force', function () {
         'email' => 'missing@example.com',
         '--force' => true,
     ])->assertFailed();
+});
+
+it('administratively finds an email address case insensitively', function () {
+    $user = User::factory()->unverified()->create(['email' => 'Owner@Example.com']);
+
+    $this->artisan('larasend:verify-user', [
+        'email' => 'OWNER@example.COM',
+        '--force' => true,
+    ])->assertSuccessful();
+
+    expect($user->fresh()->hasVerifiedEmail())->toBeTrue();
 });

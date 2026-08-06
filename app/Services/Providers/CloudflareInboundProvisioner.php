@@ -2,6 +2,7 @@
 
 namespace App\Services\Providers;
 
+use App\Models\CloudflareInboundDomain;
 use App\Models\Domain;
 use App\Models\Source;
 use App\Services\CloudflareApiClient;
@@ -44,57 +45,86 @@ class CloudflareInboundProvisioner
             );
         }
 
-        $zoneOwnerExists = Domain::query()
-            ->where('inbound_domain', Str::lower($zone['name']))
-            ->whereNotNull('inbound_enabled_at')
-            ->where('project_id', '!=', $source->project_id)
-            ->exists();
-
-        if ($zoneOwnerExists) {
-            throw new RuntimeException(
-                "Cloudflare Email Routing has one catch-all per zone. {$zone['name']} is already connected to another Larasend project.",
-            );
-        }
+        [$claim, $claimWasCreated] = $this->reserveZone($source, $domain, $zone['name']);
 
         $workerName = $this->workerName($source);
+        $catchAllConfigured = false;
 
         try {
-            $this->apiClient->uploadWorker($source, $workerName, $this->workerCode(), [
-                'LARASEND_INBOUND_URL' => route('webhooks.inbound.cloudflare', $source->webhook_token),
-            ]);
+            try {
+                $this->apiClient->uploadWorker($source, $workerName, $this->workerCode(), [
+                    'LARASEND_INBOUND_URL' => route('webhooks.inbound.cloudflare', $source->webhook_token),
+                ]);
+            } catch (Throwable $exception) {
+                throw new RuntimeException(
+                    'Could not deploy the inbound Worker: '.$exception->getMessage()
+                        .' Add the "Workers Scripts: Edit" permission to the API token, or deploy the Worker manually with wrangler.',
+                    previous: $exception,
+                );
+            }
+
+            try {
+                $this->apiClient->routeCatchAllToWorker($source, $zone['id'], $workerName);
+                $catchAllConfigured = true;
+            } catch (Throwable $exception) {
+                throw new RuntimeException(
+                    'Deployed the Worker but could not configure Email Routing: '.$exception->getMessage()
+                        .' Add the "Email Routing Rules: Edit" permission to the API token, or point a routing rule at the "'.$workerName.'" Worker in the Cloudflare dashboard.',
+                    previous: $exception,
+                );
+            }
+
+            $this->ensureRoutingDns($source, $zone['id'], $zone['name']);
+
+            // Replies go out *as* the address that received the mail, which
+            // lives on the zone apex — so the apex must also be onboarded for
+            // Email Sending. Best-effort: receiving works without it.
+            try {
+                $this->apiClient->findOrCreateSendingSubdomain($source, $zone['id'], $zone['name']);
+            } catch (Throwable $exception) {
+                report($exception);
+            }
+
+            $domain->forceFill([
+                'inbound_enabled_at' => now(),
+                'inbound_domain' => Str::lower($zone['name']),
+            ])->save();
+
+            $claim->forceFill([
+                'domain_id' => $domain->id,
+                'activated_at' => now(),
+            ])->save();
         } catch (Throwable $exception) {
-            throw new RuntimeException(
-                'Could not deploy the inbound Worker: '.$exception->getMessage()
-                    .' Add the "Workers Scripts: Edit" permission to the API token, or deploy the Worker manually with wrangler.',
-                previous: $exception,
-            );
+            if ($claimWasCreated && ! $catchAllConfigured && $claim->activated_at === null) {
+                $claim->delete();
+            }
+
+            throw $exception;
+        }
+    }
+
+    public function adoptLegacyDomain(Source $source, Domain $domain): ?string
+    {
+        if ($domain->inbound_enabled_at === null || $domain->inbound_domain !== null) {
+            return $domain->inbound_domain;
         }
 
-        try {
-            $this->apiClient->routeCatchAllToWorker($source, $zone['id'], $workerName);
-        } catch (Throwable $exception) {
-            throw new RuntimeException(
-                'Deployed the Worker but could not configure Email Routing: '.$exception->getMessage()
-                    .' Add the "Email Routing Rules: Edit" permission to the API token, or point a routing rule at the "'.$workerName.'" Worker in the Cloudflare dashboard.',
-                previous: $exception,
-            );
+        $zone = $this->apiClient->findZone($source, $domain->domain);
+
+        if ($zone === null) {
+            return null;
         }
 
-        $this->ensureRoutingDns($source, $zone['id'], $zone['name']);
+        [$claim] = $this->reserveZone($source, $domain, $zone['name']);
+        $normalizedZone = Str::lower($zone['name']);
 
-        // Replies go out *as* the address that received the mail, which
-        // lives on the zone apex — so the apex must also be onboarded for
-        // Email Sending. Best-effort: receiving works without it.
-        try {
-            $this->apiClient->findOrCreateSendingSubdomain($source, $zone['id'], $zone['name']);
-        } catch (Throwable $exception) {
-            report($exception);
-        }
-
-        $domain->forceFill([
-            'inbound_enabled_at' => now(),
-            'inbound_domain' => Str::lower($zone['name']),
+        $domain->forceFill(['inbound_domain' => $normalizedZone])->save();
+        $claim->forceFill([
+            'domain_id' => $domain->id,
+            'activated_at' => $domain->inbound_enabled_at,
         ])->save();
+
+        return $normalizedZone;
     }
 
     /**
@@ -152,5 +182,50 @@ class CloudflareInboundProvisioner
     public function workerName(Source $source): string
     {
         return 'larasend-inbound-'.substr(hash('sha256', $source->webhook_token), 0, 16);
+    }
+
+    /**
+     * @return array{CloudflareInboundDomain, bool}
+     */
+    private function reserveZone(Source $source, Domain $domain, string $zone): array
+    {
+        $normalizedZone = Str::lower($zone);
+        $legacyOwner = Domain::query()
+            ->whereNotNull('inbound_enabled_at')
+            ->whereNull('inbound_domain')
+            ->get(['id', 'project_id', 'domain'])
+            ->first(fn (Domain $candidate): bool => $this->domainBelongsToZone($candidate->domain, $normalizedZone));
+
+        if ($legacyOwner && $legacyOwner->project_id !== $source->project_id) {
+            throw $this->zoneAlreadyOwned($normalizedZone);
+        }
+
+        $claim = CloudflareInboundDomain::query()->firstOrCreate(
+            ['zone' => $normalizedZone],
+            [
+                'project_id' => $source->project_id,
+                'domain_id' => $domain->id,
+            ],
+        );
+
+        if ($claim->project_id !== $source->project_id) {
+            throw $this->zoneAlreadyOwned($normalizedZone);
+        }
+
+        return [$claim, $claim->wasRecentlyCreated];
+    }
+
+    private function domainBelongsToZone(string $domain, string $zone): bool
+    {
+        $normalizedDomain = Str::lower($domain);
+
+        return $normalizedDomain === $zone || Str::endsWith($normalizedDomain, '.'.$zone);
+    }
+
+    private function zoneAlreadyOwned(string $zone): RuntimeException
+    {
+        return new RuntimeException(
+            "Cloudflare Email Routing has one catch-all per zone. {$zone} is already connected to another Larasend project.",
+        );
     }
 }

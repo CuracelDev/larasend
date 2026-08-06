@@ -1,5 +1,6 @@
 <?php
 
+use App\Exceptions\UnsafeWebhookUrlException;
 use App\Exceptions\WebhookDnsResolutionException;
 use App\Services\WebhookUrlGuard;
 
@@ -24,6 +25,24 @@ it('rejects hostnames when any resolved address is private', function () {
     };
 
     expect($guard->isSafe('https://hooks.example.com/events'))->toBeFalse();
+});
+
+it('rejects trailing-dot webhook hostnames before dns resolution', function () {
+    $guard = new class extends WebhookUrlGuard
+    {
+        public bool $resolved = false;
+
+        protected function resolveHost(string $host): array
+        {
+            $this->resolved = true;
+
+            return ['93.184.216.34'];
+        }
+    };
+
+    expect(fn () => $guard->requestOptions('https://hooks.example.com./events'))
+        ->toThrow(UnsafeWebhookUrlException::class)
+        ->and($guard->resolved)->toBeFalse();
 });
 
 it('accepts hostnames only when every resolved address is public', function () {

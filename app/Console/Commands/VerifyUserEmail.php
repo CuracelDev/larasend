@@ -24,7 +24,7 @@ class VerifyUserEmail extends Command
         }
 
         $email = Str::lower(trim((string) $this->argument('email')));
-        $user = User::query()->where('email', $email)->first();
+        $user = User::query()->whereRaw('LOWER(email) = ?', [$email])->first();
 
         if (! $user) {
             $this->error("No user exists with email address {$email}.");

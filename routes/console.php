@@ -2,6 +2,7 @@
 
 use App\Jobs\PruneExpiredEmailData;
 use App\Jobs\RecheckPendingDomains;
+use App\Jobs\RecoverStuckQueuedEmails;
 use App\Jobs\SyncCloudflareSuppressions;
 use App\Jobs\SyncStaleSourceQuotas;
 use App\Support\SystemHealth;
@@ -17,6 +18,7 @@ Schedule::call(fn () => app(SystemHealth::class)->recordSchedulerHeartbeat())
     ->everyMinute()
     ->name('scheduler-heartbeat')
     ->onOneServer();
+Schedule::job(new RecoverStuckQueuedEmails)->everyMinute()->withoutOverlapping()->onOneServer();
 Schedule::job(new SyncCloudflareSuppressions)->hourly()->withoutOverlapping()->onOneServer();
 Schedule::job(new RecheckPendingDomains)->everyTenMinutes()->withoutOverlapping()->onOneServer();
 Schedule::job(new SyncStaleSourceQuotas)->everyThirtyMinutes()->withoutOverlapping()->onOneServer();
