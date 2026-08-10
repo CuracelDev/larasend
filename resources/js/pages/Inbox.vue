@@ -8,6 +8,8 @@ import {
     AtSign,
     Bell,
     CheckSquare,
+    ChevronLeft,
+    ChevronRight,
     Forward,
     Inbox as InboxIcon,
     Mail,
@@ -113,7 +115,14 @@ const props = defineProps<{
         closed: number;
     };
     threads: ThreadRow[];
-    pagination: { page: number; has_more: boolean };
+    pagination: {
+        page: number;
+        per_page: number;
+        from: number | null;
+        to: number | null;
+        has_previous: boolean;
+        has_more: boolean;
+    };
     selectedThread:
         | (ThreadRow & {
               messages: Message[];
@@ -195,6 +204,7 @@ function visitInbox(params: Record<string, string | null>): void {
         q: searchQuery.value,
         assigned: props.filters.assigned,
         thread: props.selectedThread?.public_id ?? null,
+        page: props.pagination.page > 1 ? String(props.pagination.page) : null,
         ...params,
     };
 
@@ -212,7 +222,7 @@ function visitInbox(params: Record<string, string | null>): void {
 }
 
 function openMailbox(key: string): void {
-    visitInbox({ mailbox: key, thread: null });
+    visitInbox({ mailbox: key, page: null, thread: null });
 }
 
 function filterAddress(address: string): void {
@@ -224,13 +234,14 @@ function filterAssignment(assigned: string): void {
 }
 
 function setAssignmentFilter(assigned: string | null): void {
-    visitInbox({ assigned, thread: null });
+    visitInbox({ assigned, page: null, thread: null });
 }
 
 function setAddressFilter(address: string | null): void {
     visitInbox({
         mailbox: props.mailbox,
         address,
+        page: null,
         thread: null,
     });
 }
@@ -240,6 +251,7 @@ function clearFilters(): void {
         mailbox: props.mailbox,
         address: null,
         assigned: null,
+        page: null,
         thread: null,
     });
 }
@@ -254,7 +266,10 @@ function onSearchInput(): void {
         window.clearTimeout(searchTimer);
     }
 
-    searchTimer = window.setTimeout(() => visitInbox({ thread: null }), 350);
+    searchTimer = window.setTimeout(
+        () => visitInbox({ page: null, thread: null }),
+        350,
+    );
 }
 
 function threadAction(action: string): void {
@@ -599,7 +614,13 @@ watch(hasOpenOverlay, async (open, wasOpen) => {
 usePoll(
     10000,
     {
-        only: ['threads', 'counts', 'addresses', 'selectedThread'],
+        only: [
+            'threads',
+            'pagination',
+            'counts',
+            'addresses',
+            'selectedThread',
+        ],
         showProgress: false,
     },
     { autoStart: true },
@@ -1204,7 +1225,7 @@ function participantSummary(thread: ThreadRow): string {
             </aside>
 
             <section
-                class="min-h-0 grid-rows-[auto_minmax(0,1fr)] border-r border-zinc-200 md:grid dark:border-[#1d2125]"
+                class="min-h-0 grid-rows-[auto_minmax(0,1fr)_auto] border-r border-zinc-200 md:grid dark:border-[#1d2125]"
                 :class="
                     selectedThread && mobileThreadOpen
                         ? 'hidden md:grid'
@@ -1398,27 +1419,44 @@ function participantSummary(thread: ThreadRow): string {
                             </span>
                         </div>
                     </button>
-                    <div
-                        v-if="pagination.page > 1 || pagination.has_more"
-                        class="flex gap-2 p-3"
-                    >
+                </div>
+                <div
+                    v-if="pagination.has_previous || pagination.has_more"
+                    class="flex items-center justify-between gap-2 border-t border-zinc-200 bg-white px-3 py-2 dark:border-[#1d2125] dark:bg-[#0b0c0d]"
+                    aria-label="Conversation pagination"
+                >
+                    <p class="min-w-0 truncate text-[11px] text-zinc-500">
+                        <span
+                            class="font-semibold text-zinc-700 dark:text-zinc-300"
+                        >
+                            {{ pagination.from }}–{{ pagination.to }}
+                        </span>
+                        conversations · Page {{ pagination.page }}
+                    </p>
+                    <div class="flex shrink-0 items-center gap-1">
                         <button
-                            v-if="pagination.page > 1"
                             type="button"
-                            class="flex-1 rounded-md border border-zinc-200 py-2 text-xs font-semibold dark:border-[#1d2125]"
+                            class="inline-flex h-8 items-center gap-1 rounded-md border border-zinc-200 px-2 text-[11px] font-semibold text-zinc-700 transition hover:border-zinc-300 hover:bg-zinc-50 focus-visible:ring-2 focus-visible:ring-teal-400 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-35 dark:border-[#25292d] dark:text-zinc-300 dark:hover:border-[#34393e] dark:hover:bg-[#151719]"
+                            :disabled="!pagination.has_previous"
+                            aria-label="Show newer conversations"
                             @click="
                                 visitInbox({
-                                    page: String(pagination.page - 1),
+                                    page:
+                                        pagination.page - 1 > 1
+                                            ? String(pagination.page - 1)
+                                            : null,
                                     thread: null,
                                 })
                             "
                         >
-                            Previous
+                            <ChevronLeft class="size-3.5" />
+                            Newer
                         </button>
                         <button
-                            v-if="pagination.has_more"
                             type="button"
-                            class="flex-1 rounded-md border border-zinc-200 py-2 text-xs font-semibold dark:border-[#1d2125]"
+                            class="inline-flex h-8 items-center gap-1 rounded-md border border-zinc-200 px-2 text-[11px] font-semibold text-zinc-700 transition hover:border-zinc-300 hover:bg-zinc-50 focus-visible:ring-2 focus-visible:ring-teal-400 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-35 dark:border-[#25292d] dark:text-zinc-300 dark:hover:border-[#34393e] dark:hover:bg-[#151719]"
+                            :disabled="!pagination.has_more"
+                            aria-label="Show older conversations"
                             @click="
                                 visitInbox({
                                     page: String(pagination.page + 1),
@@ -1426,7 +1464,8 @@ function participantSummary(thread: ThreadRow): string {
                                 })
                             "
                         >
-                            Next 50
+                            Older
+                            <ChevronRight class="size-3.5" />
                         </button>
                     </div>
                 </div>

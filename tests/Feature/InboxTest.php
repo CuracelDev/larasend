@@ -82,6 +82,52 @@ it('renders the inbox with threads, counts, and interleaved messages', function 
             ->where('addresses.0.address', 'support@example.com'));
 });
 
+it('paginates conversations with stable ordering and page metadata', function () {
+    [$user, $project] = inboxFixture();
+    $lastActivityAt = now();
+
+    foreach (range(1, 51) as $number) {
+        Thread::query()->create([
+            'public_id' => "thread-pagination-{$number}",
+            'workspace_id' => $project->workspace_id,
+            'project_id' => $project->id,
+            'subject' => "Conversation {$number}",
+            'subject_key' => "conversation {$number}",
+            'participants' => ["customer{$number}@example.com"],
+            'last_direction' => 'inbound',
+            'last_snippet' => "Message {$number}",
+            'message_count' => 1,
+            'last_activity_at' => $lastActivityAt,
+        ]);
+    }
+
+    $this->actingAs($user)
+        ->get("/projects/{$project->slug}/inbox?mailbox=inbox")
+        ->assertInertia(fn ($page) => $page
+            ->has('threads', 50)
+            ->where('threads.0.subject', 'Conversation 51')
+            ->where('threads.49.subject', 'Conversation 2')
+            ->where('pagination.page', 1)
+            ->where('pagination.per_page', 50)
+            ->where('pagination.from', 1)
+            ->where('pagination.to', 50)
+            ->where('pagination.has_previous', false)
+            ->where('pagination.has_more', true));
+
+    $this->actingAs($user)
+        ->get("/projects/{$project->slug}/inbox?mailbox=inbox&page=2")
+        ->assertInertia(fn ($page) => $page
+            ->has('threads', 1)
+            ->where('threads.0.subject', 'Conversation 1')
+            ->where('selectedThread.subject', 'Conversation 1')
+            ->where('pagination.page', 2)
+            ->where('pagination.per_page', 50)
+            ->where('pagination.from', 51)
+            ->where('pagination.to', 51)
+            ->where('pagination.has_previous', true)
+            ->where('pagination.has_more', false));
+});
+
 it('keeps address views stable and counts distinct conversations', function () {
     [$user, $project, $source] = inboxFixture();
 

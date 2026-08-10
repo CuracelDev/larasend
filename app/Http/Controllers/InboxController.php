@@ -18,6 +18,8 @@ use Inertia\Response;
 
 class InboxController extends Controller
 {
+    private const THREADS_PER_PAGE = 50;
+
     public function __invoke(Request $request, ProjectContext $context): Response
     {
         $user = $request->user();
@@ -34,6 +36,7 @@ class InboxController extends Controller
         $assigned = $request->string('assigned')->toString();
         $page = max(1, $request->integer('page', 1));
         $threads = $this->threadsFor($project, $user->id, $mailbox, $address, $search, $assigned, $page);
+        $visibleThreads = $threads->take(self::THREADS_PER_PAGE);
         $selected = $this->selectedThread($project, $request->string('thread')->toString(), $threads->first()?->public_id);
 
         // Opening a conversation reads it — standard mail client behavior,
@@ -78,8 +81,15 @@ class InboxController extends Controller
                 'archived' => $project->threads()->whereNotNull('archived_at')->count(),
                 'closed' => $project->threads()->where('status', 'closed')->count(),
             ],
-            'threads' => $threads->take(50)->map(fn (Thread $thread): array => $this->serializeThread($thread, $user->id)),
-            'pagination' => ['page' => $page, 'has_more' => $threads->count() > 50],
+            'threads' => $visibleThreads->map(fn (Thread $thread): array => $this->serializeThread($thread, $user->id)),
+            'pagination' => [
+                'page' => $page,
+                'per_page' => self::THREADS_PER_PAGE,
+                'from' => $visibleThreads->isEmpty() ? null : (($page - 1) * self::THREADS_PER_PAGE) + 1,
+                'to' => $visibleThreads->isEmpty() ? null : (($page - 1) * self::THREADS_PER_PAGE) + $visibleThreads->count(),
+                'has_previous' => $page > 1,
+                'has_more' => $threads->count() > self::THREADS_PER_PAGE,
+            ],
             'selectedThread' => $selected ? [
                 ...$this->serializeThread($selected, $user->id),
                 'messages' => $this->messagesFor($selected),
@@ -99,7 +109,7 @@ class InboxController extends Controller
     /**
      * @return Collection<int, Thread>
      */
-    private function threadsFor(Project $project, int $userId, string $mailbox, ?string $address, string $search, string $assigned, int $page)
+    private function threadsFor(Project $project, int $userId, string $mailbox, ?string $address, string $search, string $assigned, int $page): Collection
     {
         return $project->threads()
             ->tap(fn (Builder $query) => $this->applyMailbox($query, $mailbox, $userId))
@@ -119,9 +129,10 @@ class InboxController extends Controller
                 });
             })
             ->orderByDesc('last_activity_at')
+            ->orderByDesc('id')
             ->with(['assignedTo:id,name', 'userStates' => fn ($query) => $query->where('user_id', $userId)])
-            ->offset(($page - 1) * 50)
-            ->limit(51)
+            ->offset(($page - 1) * self::THREADS_PER_PAGE)
+            ->limit(self::THREADS_PER_PAGE + 1)
             ->get();
     }
 
