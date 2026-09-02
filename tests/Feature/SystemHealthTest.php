@@ -4,6 +4,7 @@ use App\Models\User;
 use App\Support\ProjectContext;
 use App\Support\SystemHealth;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 
 it('reports worker and scheduler heartbeats through the activity page', function () {
     $user = User::factory()->create();
@@ -60,4 +61,34 @@ it('passes the doctor command when heartbeats are fresh and nothing is configure
     app(SystemHealth::class)->recordSchedulerHeartbeat();
 
     $this->artisan('larasend:doctor')->assertExitCode(0);
+});
+
+it('reports operational readiness only when background processes are healthy', function () {
+    $this->get('/ready')->assertStatus(503)->assertContent('');
+
+    app(SystemHealth::class)->recordWorkerHeartbeat();
+    app(SystemHealth::class)->recordSchedulerHeartbeat();
+
+    expect(app(SystemHealth::class)->workerIsAlive())->toBeTrue()
+        ->and(app(SystemHealth::class)->schedulerIsAlive())->toBeTrue()
+        ->and(DB::table('failed_jobs')->exists())->toBeFalse()
+        ->and(app(SystemHealth::class)->operationallyReady())->toBeTrue();
+
+    $this->get('/ready')->assertNoContent();
+});
+
+it('fails operational readiness when a queue job has failed', function () {
+    app(SystemHealth::class)->recordWorkerHeartbeat();
+    app(SystemHealth::class)->recordSchedulerHeartbeat();
+
+    DB::table('failed_jobs')->insert([
+        'uuid' => fake()->uuid(),
+        'connection' => 'redis',
+        'queue' => 'default',
+        'payload' => '{}',
+        'exception' => 'Synthetic test failure',
+        'failed_at' => now(),
+    ]);
+
+    $this->get('/ready')->assertStatus(503)->assertContent('');
 });

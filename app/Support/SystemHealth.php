@@ -6,6 +6,7 @@ use App\Models\Project;
 use Carbon\CarbonInterface;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Date;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Heartbeats for the two background processes a self-hosted install silently
@@ -47,6 +48,13 @@ class SystemHealth
     public function schedulerIsAlive(): bool
     {
         return $this->schedulerHeartbeatAt()?->greaterThan(now()->subSeconds(180)) === true;
+    }
+
+    public function operationallyReady(): bool
+    {
+        return $this->workerIsAlive()
+            && $this->schedulerIsAlive()
+            && ! DB::table('failed_jobs')->exists();
     }
 
     /**

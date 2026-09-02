@@ -12,6 +12,7 @@ use App\Http\Controllers\ProjectController;
 use App\Http\Controllers\ThreadActionController;
 use App\Http\Controllers\WorkspaceMemberController;
 use App\Support\RegistrationAvailability;
+use App\Support\SystemHealth;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
 use Laravel\Fortify\Features;
@@ -26,6 +27,16 @@ Route::get('/', function () {
             && RegistrationAvailability::isOpen(),
     ]);
 })->name('home');
+
+Route::get('/ready', function (SystemHealth $health) {
+    try {
+        $ready = $health->operationallyReady();
+    } catch (Throwable) {
+        $ready = false;
+    }
+
+    return response()->noContent($ready ? 204 : 503);
+})->name('ready');
 
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('dashboard', [OnboardingController::class, 'entry'])->name('dashboard');
