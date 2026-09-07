@@ -440,6 +440,7 @@ const statusFilters = [
     'Sending',
     'Bounced',
     'Complained',
+    'Suppressed',
     'Failed',
 ];
 const selectedFilter = ref(statusFilterLabel(props.filters.status));
@@ -1743,6 +1744,7 @@ function statusClass(status: string): string {
             clicked: 'bg-teal-500/12 text-teal-300',
             bounced: 'bg-red-500/12 text-red-400',
             complained: 'bg-violet-500/12 text-violet-400',
+            suppressed: 'bg-zinc-500/12 text-zinc-400',
             failed: 'bg-red-500/12 text-red-400',
         }[status] ?? 'bg-zinc-500/12 text-zinc-400'
     );
@@ -1759,6 +1761,7 @@ function dotClass(status: string): string {
             clicked: 'bg-teal-300',
             bounced: 'bg-red-400',
             complained: 'bg-violet-400',
+            suppressed: 'bg-zinc-400',
             failed: 'bg-red-400',
         }[status] ?? 'bg-zinc-400'
     );
@@ -1781,6 +1784,8 @@ function eventToneClass(type: string): string {
             bounced: 'bg-red-400',
             complaint: 'bg-violet-400',
             complained: 'bg-violet-400',
+            suppress: 'bg-zinc-400',
+            suppressed: 'bg-zinc-400',
             failed: 'bg-red-400',
         }[type] ?? 'bg-zinc-400'
     );

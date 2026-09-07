@@ -42,31 +42,39 @@ class EmailSendService
         $template = $this->resolveTemplate($project, $payload);
         $payload = $this->applyTemplate($payload, $template);
         $from = $payload['from'] ?? $source->default_from_email;
-        $this->ensureSourceCanSend($project, $source, (string) $from);
-        $this->ensureRecipientsAreSendable($project, $payload);
+        [$payload, $suppressedRecipients] = $this->withoutSuppressedRecipients($project, $payload);
+
+        $hasSendableRecipients = collect(['to', 'cc', 'bcc'])
+            ->contains(fn (string $type): bool => ($payload[$type] ?? []) !== []);
+
+        if ($hasSendableRecipients) {
+            $this->ensureSourceCanSend($project, $source, (string) $from);
+        }
 
         $publicId = 'email_'.Str::random(24);
-        $mime = $this->mimeBuilder->build(
-            from: $from,
-            to: $payload['to'],
-            cc: $payload['cc'] ?? [],
-            bcc: $payload['bcc'] ?? [],
-            replyTo: $payload['reply_to'] ?? null,
-            subject: $payload['subject'],
-            html: $payload['html'] ?? null,
-            text: $payload['text'] ?? null,
-            headers: $payload['headers'] ?? [],
-            attachments: $payload['attachments'] ?? [],
-        );
         $mimeDisk = (string) config('larasend.mime_disk', 'local');
-        $mimePath = "emails/{$project->id}/{$publicId}.eml";
+        $mimePath = $hasSendableRecipients ? "emails/{$project->id}/{$publicId}.eml" : null;
+        $mime = $hasSendableRecipients
+            ? $this->mimeBuilder->build(
+                from: $from,
+                to: $payload['to'],
+                cc: $payload['cc'] ?? [],
+                bcc: $payload['bcc'] ?? [],
+                replyTo: $payload['reply_to'] ?? null,
+                subject: $payload['subject'],
+                html: $payload['html'] ?? null,
+                text: $payload['text'] ?? null,
+                headers: $payload['headers'] ?? [],
+                attachments: $payload['attachments'] ?? [],
+            )
+            : null;
 
-        if (! Storage::disk($mimeDisk)->put($mimePath, $mime)) {
+        if ($mimePath !== null && ! Storage::disk($mimeDisk)->put($mimePath, $mime)) {
             throw new \RuntimeException("Unable to store MIME content for {$publicId}.");
         }
 
         try {
-            $email = DB::transaction(function () use ($project, $source, $payload, $template, $from, $publicId, $mime, $mimeDisk, $mimePath, $idempotencyKey, $idempotencyHash) {
+            $email = DB::transaction(function () use ($project, $source, $payload, $template, $from, $publicId, $mime, $mimeDisk, $mimePath, $hasSendableRecipients, $suppressedRecipients, $idempotencyKey, $idempotencyHash) {
                 $fromAddress = $this->mimeBuilder->splitAddress($from);
 
                 $email = Email::create([
@@ -78,7 +86,7 @@ class EmailSendService
                     'source_id' => $source->id,
                     'template_id' => $template?->id,
                     'environment' => $source->environment,
-                    'status' => 'queued',
+                    'status' => $hasSendableRecipients ? 'queued' : 'suppressed',
                     'from_email' => $fromAddress['email'],
                     'from_name' => $fromAddress['name'],
                     'subject' => $payload['subject'],
@@ -86,7 +94,7 @@ class EmailSendService
                     'text' => $payload['text'] ?? null,
                     'mime_disk' => $mimeDisk,
                     'mime_path' => $mimePath,
-                    'mime_size' => strlen($mime),
+                    'mime_size' => $mime !== null ? strlen($mime) : null,
                     'headers' => $payload['headers'] ?? [],
                     'tags' => $payload['tags'] ?? [],
                 ]);
@@ -110,17 +118,36 @@ class EmailSendService
                     ]);
                 }
 
-                $this->threads->attachOutbound($email);
+                foreach ($suppressedRecipients as $recipient) {
+                    $email->events()->create([
+                        'source_id' => $source->id,
+                        'event_type' => 'suppress',
+                        'recipient' => $recipient,
+                        'payload' => ['reason' => 'recipient_suppressed'],
+                        'occurred_at' => now(),
+                    ]);
+                }
+
+                if ($hasSendableRecipients) {
+                    $this->threads->attachOutbound($email);
+                }
 
                 return $email->load(['recipients', 'events', 'attachments', 'source', 'template']);
             });
         } catch (Throwable $exception) {
-            Storage::disk($mimeDisk)->delete($mimePath);
+            if ($mimePath !== null) {
+                Storage::disk($mimeDisk)->delete($mimePath);
+            }
 
             throw $exception;
         }
 
         EmailActivityUpdated::dispatch($email);
+
+        if (! $hasSendableRecipients) {
+            return $email;
+        }
+
         $sendJob = new SendQueuedEmail($email->id);
 
         try {
@@ -215,7 +242,10 @@ class EmailSendService
     private function complaintRateIsTooHigh(Project $project): bool
     {
         $since = now()->subDays(30);
-        $total = $project->emails()->where('created_at', '>=', $since)->count();
+        $total = $project->emails()
+            ->where('created_at', '>=', $since)
+            ->where('status', '!=', 'suppressed')
+            ->count();
 
         if ($total < 100) {
             return false;
@@ -231,10 +261,9 @@ class EmailSendService
 
     /**
      * @param  array<string, mixed>  $payload
-     *
-     * @throws ValidationException
+     * @return array{0: array<string, mixed>, 1: array<int, string>}
      */
-    private function ensureRecipientsAreSendable(Project $project, array $payload): void
+    private function withoutSuppressedRecipients(Project $project, array $payload): array
     {
         $recipients = collect(['to', 'cc', 'bcc'])
             ->flatMap(fn (string $type) => $payload[$type] ?? [])
@@ -246,7 +275,7 @@ class EmailSendService
             ->values();
 
         if ($recipients->isEmpty()) {
-            return;
+            return [$payload, []];
         }
 
         $suppressed = $project->suppressions()
@@ -254,15 +283,26 @@ class EmailSendService
             ->whereNormalizedEmailIn($recipients)
             ->pluck('email')
             ->map(fn (string $email): string => Suppression::normalizeEmail($email))
+            ->unique()
+            ->values()
             ->all();
 
         if ($suppressed === []) {
-            return;
+            return [$payload, []];
         }
 
-        throw ValidationException::withMessages([
-            'to' => 'This email includes suppressed recipients: '.implode(', ', $suppressed),
-        ]);
+        $suppressedLookup = array_fill_keys($suppressed, true);
+
+        foreach (['to', 'cc', 'bcc'] as $type) {
+            $payload[$type] = array_values(array_filter(
+                $payload[$type] ?? [],
+                fn (string $recipient): bool => ! isset($suppressedLookup[Suppression::normalizeEmail(
+                    $this->mimeBuilder->splitAddress($recipient)['email'],
+                )]),
+            ));
+        }
+
+        return [$payload, $suppressed];
     }
 
     /**

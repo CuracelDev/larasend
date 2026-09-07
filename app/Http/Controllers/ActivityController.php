@@ -36,6 +36,7 @@ class ActivityController extends Controller
         'sending',
         'bounced',
         'complained',
+        'suppressed',
         'failed',
     ];
 
@@ -407,7 +408,10 @@ class ActivityController extends Controller
     private function hasUnsafeComplaintRate(Project $project): bool
     {
         $since = now()->subDays(30);
-        $total = $project->emails()->where('created_at', '>=', $since)->count();
+        $total = $project->emails()
+            ->where('created_at', '>=', $since)
+            ->where('status', '!=', 'suppressed')
+            ->count();
 
         if ($total < 100) {
             return false;
@@ -552,7 +556,10 @@ class ActivityController extends Controller
     private function bounceMetrics(Project $project): array
     {
         $since = now()->subDays(30);
-        $total = max($project->emails()->where('created_at', '>=', $since)->count(), 1);
+        $total = max($project->emails()
+            ->where('created_at', '>=', $since)
+            ->where('status', '!=', 'suppressed')
+            ->count(), 1);
         $bounces = $project->emails()->where('status', 'bounced')->where('created_at', '>=', $since)->with('events')->get();
         $hard = $bounces->filter(fn (Email $email) => $this->bounceTypeFor($email) === 'Hard')->count();
         $soft = $bounces->filter(fn (Email $email) => $this->bounceTypeFor($email) === 'Soft')->count();
@@ -692,7 +699,7 @@ class ActivityController extends Controller
         return [
             'sent' => $project->emails()
                 ->where('created_at', '>=', now()->subDays(30))
-                ->whereNotIn('status', ['queued', 'failed'])
+                ->whereIn('status', ['sending', 'sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained'])
                 ->count(),
             'limit' => $this->quotaValue($lastQuota, ['Max24HourSend', 'max24HourSend', 'max_24_hour_send']),
             'rate' => $this->quotaValue($lastQuota, ['MaxSendRate', 'maxSendRate', 'max_send_rate']),

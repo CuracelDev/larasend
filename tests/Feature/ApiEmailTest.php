@@ -22,7 +22,6 @@ use Illuminate\Http\Request as HttpRequest;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Validation\ValidationException;
 
 function larasendProjectFixture(): array
 {
@@ -430,7 +429,7 @@ it('sends bcc recipients through an explicit ses destination', function () {
         ->and($project)->toBeInstanceOf(Project::class);
 });
 
-it('blocks sends to suppressed recipients', function () {
+it('accepts an all-suppressed send without dispatching it', function () {
     [$workspace, $project, $source, $token] = larasendProjectFixture();
 
     Queue::fake();
@@ -443,18 +442,99 @@ it('blocks sends to suppressed recipients', function () {
         'reason' => 'complaint',
         'event_type' => 'complaint',
     ]);
+    $source->forceFill([
+        'aws_access_key_id' => null,
+        'aws_secret_access_key' => null,
+    ])->save();
+    $project->domains()->update([
+        'status' => 'pending',
+        'verified_at' => null,
+    ]);
 
-    $this->withToken($token)->postJson('/api/emails', [
+    $payload = [
         'from' => 'Larasend <receipts@example.com>',
         'to' => ['Maya <maya@example.com>'],
         'subject' => 'Welcome to Larasend',
         'html' => '<h1>Hello Maya</h1>',
         'text' => 'Hello Maya',
-    ])->assertUnprocessable()
-        ->assertJsonValidationErrors('to');
+    ];
+    $response = $this->withToken($token)
+        ->withHeader('Idempotency-Key', 'suppressed-message')
+        ->postJson('/api/emails', $payload)
+        ->assertAccepted()
+        ->assertJsonStructure(['id', 'object']);
+    $replay = $this->withToken($token)
+        ->withHeader('Idempotency-Key', 'suppressed-message')
+        ->postJson('/api/emails', $payload)
+        ->assertAccepted()
+        ->assertJsonPath('replayed', true);
 
-    expect(Email::query()->count())->toBe(0);
-    Queue::assertNothingPushed();
+    $email = Email::query()->where('public_id', $response->json('id'))->firstOrFail();
+
+    expect($email->status)->toBe('suppressed')
+        ->and($email->mime_path)->toBeNull()
+        ->and($email->recipients()->count())->toBe(0)
+        ->and($email->events()->where('event_type', 'suppress')->where('recipient', 'maya@example.com')->exists())->toBeTrue()
+        ->and($replay->json('id'))->toBe($response->json('id'))
+        ->and(Email::query()->count())->toBe(1);
+    Queue::assertNotPushed(SendQueuedEmail::class);
+});
+
+it('removes suppressed recipients and dispatches the remaining recipients', function () {
+    [$workspace, $project, $source, $token] = larasendProjectFixture();
+
+    Queue::fake();
+    Http::fake([
+        'https://email.*.amazonaws.com/v2/email/outbound-emails' => Http::response(['MessageId' => 'ses-message-filtered']),
+    ]);
+
+    foreach (['blocked-to@example.com', 'blocked-cc@example.com', 'blocked-bcc@example.com'] as $address) {
+        Suppression::create([
+            'workspace_id' => $workspace->id,
+            'project_id' => $project->id,
+            'source_id' => $source->id,
+            'email' => $address,
+            'reason' => 'complaint',
+            'event_type' => 'complaint',
+        ]);
+    }
+
+    $response = $this->withToken($token)->postJson('/api/emails', [
+        'from' => 'Larasend <receipts@example.com>',
+        'to' => ['Blocked To <blocked-to@example.com>', 'Allowed To <allowed-to@example.com>'],
+        'cc' => ['Blocked Cc <blocked-cc@example.com>', 'Allowed Cc <allowed-cc@example.com>'],
+        'bcc' => ['Blocked Bcc <blocked-bcc@example.com>', 'Allowed Bcc <allowed-bcc@example.com>'],
+        'subject' => 'Partially suppressed',
+        'text' => 'Hello',
+    ])->assertAccepted();
+
+    $email = Email::query()->where('public_id', $response->json('id'))->firstOrFail();
+
+    expect($email->status)->toBe('queued')
+        ->and($email->recipients()->pluck('email')->all())->toBe([
+            'allowed-to@example.com',
+            'allowed-cc@example.com',
+            'allowed-bcc@example.com',
+        ])
+        ->and($email->events()->where('event_type', 'suppress')->count())->toBe(3);
+    Queue::assertPushed(SendQueuedEmail::class, fn (SendQueuedEmail $job): bool => $job->emailId === $email->id);
+
+    (new SendQueuedEmail($email->id))->handle(app(EmailProviderFactory::class));
+
+    Http::assertSent(function (Request $request): bool {
+        if (! str_contains($request->url(), '/v2/email/outbound-emails')) {
+            return false;
+        }
+
+        $destination = $request->data()['Destination'] ?? [];
+
+        return ($destination['ToAddresses'] ?? []) === ['allowed-to@example.com']
+            && ($destination['CcAddresses'] ?? []) === ['allowed-cc@example.com']
+            && ($destination['BccAddresses'] ?? []) === ['allowed-bcc@example.com'];
+    });
+
+    expect($email->fresh()->status)->toBe('sent')
+        ->and($email->fresh()->ses_message_id)->toBe('ses-message-filtered');
 });
 
 it('keeps non-ASCII suppression variants distinct while matching ASCII case and spaces', function () {
@@ -480,16 +560,16 @@ it('keeps non-ASCII suppression variants distinct while matching ASCII case and 
     ]);
 
     expect($allowed->subject)->toBe('Distinct non-ASCII recipient')
-        ->and(fn () => app(EmailSendService::class)->send($project, $source, [
+        ->and(app(EmailSendService::class)->send($project, $source, [
             'from' => 'Larasend <receipts@example.com>',
             'to' => ['Blocked < ÄBC@EXAMPLE.COM >'],
             'subject' => 'ASCII case and space variant',
             'html' => '<h1>Hello</h1>',
             'text' => 'Hello',
-        ]))->toThrow(ValidationException::class);
+        ])->status)->toBe('suppressed');
 });
 
-it('allows sends to expired suppressions but blocks active suppressions', function () {
+it('allows sends to expired suppressions but accepts active suppressions as a no-op', function () {
     [$workspace, $project, $source, $token] = larasendProjectFixture();
 
     Queue::fake();
@@ -522,17 +602,16 @@ it('allows sends to expired suppressions but blocks active suppressions', functi
         'expires_at' => now()->addMinute(),
     ]);
 
-    $this->withToken($token)->postJson('/api/emails', [
+    $activeResponse = $this->withToken($token)->postJson('/api/emails', [
         'from' => 'Larasend <receipts@example.com>',
         'to' => ['Active <active@example.com>'],
         'subject' => 'Active suppression',
         'html' => '<h1>Hello</h1>',
         'text' => 'Hello',
-    ])->assertUnprocessable()
-        ->assertJsonValidationErrors('to');
+    ])->assertAccepted();
 
     expect(Email::query()->where('subject', 'Expired suppression')->exists())->toBeTrue()
-        ->and(Email::query()->where('subject', 'Active suppression')->exists())->toBeFalse();
+        ->and(Email::query()->where('public_id', $activeResponse->json('id'))->value('status'))->toBe('suppressed');
 });
 
 it('lists and shows only emails scoped to the api key project', function () {
