@@ -424,10 +424,9 @@ it('reactivates an expired collision as Cloudflare-owned, blocks sending, and sa
         'subject' => 'Must stay blocked',
         'html' => '<h1>Blocked</h1>',
         'text' => 'Blocked',
-    ])->assertUnprocessable()
-        ->assertJsonValidationErrors('to');
+    ])->assertAccepted();
 
-    expect(Email::query()->where('subject', 'Must stay blocked')->exists())->toBeFalse();
+    expect(Email::query()->where('subject', 'Must stay blocked')->value('status'))->toBe('suppressed');
 
     runCloudflareSuppressionSourceSync($source);
 

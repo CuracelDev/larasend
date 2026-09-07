@@ -33,7 +33,7 @@ class BuildProjectDashboard
         $outbound = $project->emails()
             ->whereBetween('created_at', [$currentStart, $currentEnd])
             ->toBase()
-            ->selectRaw('count(*) as total')
+            ->selectRaw("count(case when status != 'suppressed' then 1 end) as total")
             ->selectRaw("count(case when status = 'failed' then 1 end) as failed")
             ->selectRaw("count(case when status = 'queued' then 1 end) as queued")
             ->selectRaw("count(case when status = 'bounced' then 1 end) as bounced")
@@ -139,7 +139,7 @@ class BuildProjectDashboard
                 : $start->copy()->addSeconds($bucketSeconds * ($index + 1));
 
             $query
-                ->selectRaw("count(case when created_at >= ? and created_at < ? then 1 end) as sent_{$index}", [$bucketStart, $bucketEnd])
+                ->selectRaw("count(case when created_at >= ? and created_at < ? and status != 'suppressed' then 1 end) as sent_{$index}", [$bucketStart, $bucketEnd])
                 ->selectRaw("count(case when created_at >= ? and created_at < ? and status in ('delivered', 'opened', 'clicked') then 1 end) as delivered_{$index}", [$bucketStart, $bucketEnd])
                 ->selectRaw("count(case when created_at >= ? and created_at < ? and status in ('failed', 'bounced', 'complained') then 1 end) as failed_{$index}", [$bucketStart, $bucketEnd]);
 
